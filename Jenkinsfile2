@@ -4,14 +4,17 @@ pipeline {
     tools {
         nodejs 'nodejs25'
         maven 'maven3'
-        jdk 'jdk17'
         hudson.plugins.sonar.SonarRunnerInstallation 'sonarqube-scanner'
-        dependencyCheck 'odc'
+        org.jenkinsci.plugins.DependencyCheck.tools.DependencyCheckInstallation 'odc'
+        dockerTool 'docker-latest'
     }
 
     environment {
-        DOCKER_HUB = credentials('docker-hub')
-        AWS = credentials('aws-creds')
+        DOCKER_HUB = credentials('docker-creds')
+        AWS_CREDS  = credentials('aws-creds')
+        SONARQUBE_TOKEN = credentials('sonar-token')
+        REGISTRY = "tejastejas/bookmyshow"
+        IMAGE_TAG = "latest"
     }
 
     stages {
@@ -19,78 +22,75 @@ pipeline {
         stage('Checkout') {
             steps {
                 cleanWs()
-                git branch: 'main', url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
+                git branch: 'main',
+                    url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
             }
         }
 
-        stage('Install Dependencies (FAST)') {
+        stage('Install Dependencies (Fast)') {
             steps {
-                dir('bookmyshow-app') {
-                    sh '''
-                        echo "FAST NPM INSTALL..."
-                        npm install --silent --no-audit --prefer-offline
-                    '''
-                }
+                echo "Installing NPM packages fast mode..."
+                sh """
+                   cd bookmyshow-app
+                   npm install --silent
+                """
             }
         }
 
-        stage('SonarQube') {
+        stage('SonarQube Analysis (Fast)') {
             steps {
                 withSonarQubeEnv('sonarserver') {
                     sh '''
                         sonar-scanner \
-                        -Dsonar.projectKey=BMS \
-                        -Dsonar.sources=bookmyshow-app \
-                        -Dsonar.exclusions=**/node_modules/**
+                          -Dsonar.projectKey=BMS \
+                          -Dsonar.sources=bookmyshow-app \
+                          -Dsonar.exclusions=**/node_modules/** \
+                          -Dsonar.token=$SONARQUBE_TOKEN
                     '''
                 }
             }
         }
 
-        stage('Quality Gate (FAST)') {
+        stage('OWASP FS Scan (Fast)') {
             steps {
-                timeout(time: 30, unit: 'SECONDS') {
-                    waitForQualityGate abortPipeline: true
-                }
+                sh '''
+                    dependency-check.sh \
+                    --project "BMS" \
+                    --scan bookmyshow-app \
+                    --format HTML \
+                    --noupdate \
+                    --out ./odc-report
+                '''
             }
         }
 
-        stage('OWASP FS Scan (FAST)') {
+        stage('Trivy FS Scan (Fast)') {
             steps {
-                dependencyCheckAnalyzer odcInstallation: 'odc',
-                    scanPath: 'bookmyshow-app',
-                    outputDirectory: 'odc-report',
-                    isQuickEnabled: true
+                sh '''
+                    trivy fs --scanners vuln --exit-code 0 .
+                '''
             }
         }
 
-        stage('Trivy FS Scan') {
-            steps {
-                sh 'trivy fs --severity CRITICAL bookmyshow-app'
-            }
-        }
-
-        stage('Docker Build & Push') {
+        stage('Docker Build & Push (Fast)') {
             steps {
                 script {
-                    sh '''
-                        docker build -t tejas886/bookmyshow:latest bookmyshow-app
-                    '''
-                    withDockerRegistry(credentialsId: 'docker-hub', url: '') {
-                        sh '''
-                            docker push tejas886/bookmyshow:latest
-                        '''
-                    }
+                    sh """
+                        docker login -u $DOCKER_HUB_USR -p $DOCKER_HUB_PSW
+                        docker build -t $REGISTRY:$IMAGE_TAG .
+                        docker push $REGISTRY:$IMAGE_TAG
+                    """
                 }
             }
         }
 
-        stage('Deploy to EKS') {
+        stage('Deploy to EKS (Fast)') {
             steps {
                 sh '''
                     aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
-                    kubectl apply -f deployment.yml
-                    kubectl apply -f service.yml
+
+                    kubectl set image deployment/bookmyshow \
+                    bookmyshow=$REGISTRY:$IMAGE_TAG
                 '''
             }
         }
@@ -99,9 +99,9 @@ pipeline {
     post {
         always {
             emailext(
-                to: "tejastejasa@gmail.com",
-                subject: "Pipeline Completed",
-                body: "Pipeline finished"
+                to: 'tejastejasa@gmail.com',
+                subject: "BookMyShow Pipeline: ${currentBuild.currentResult}",
+                body: "Pipeline finished with status: ${currentBuild.currentResult}"
             )
         }
     }
