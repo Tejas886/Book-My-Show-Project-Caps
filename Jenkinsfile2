@@ -57,19 +57,22 @@ pipeline {
             }
         }
 
-        stage('OWASP FS Scan (Non-Blocking)') {
-            steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    dependencyCheck odcInstallation: 'odc', additionalArguments: """
-                        --scan bookmyshow-app
-                        --disableAssembly
-                        --enableExperimental
-                        --noupdate
-                    """
-                }
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
-            }
-        }
+       stage('OWASP FS Scan') {
+    steps {
+        dependencyCheck additionalArguments: '''
+            --scan bookmyshow-app
+            --format XML
+            --out .
+            --disableAssembly
+            --enableExperimental
+            --noupdate
+        ''',
+        odcInstallation: 'odc'
+
+        dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+    }
+}
+
 
         stage('Trivy FS Scan (Non-Blocking)') {
             steps {
@@ -95,20 +98,30 @@ pipeline {
             }
         }
 
-        stage('Deploy to EKS') {
-            steps {
-                sh """
-                    aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+       stage('Deploy to EKS') {
+    steps {
+        withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+            sh '''
+            echo "Setting AWS credentials..."
+            export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+            export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+            export AWS_DEFAULT_REGION=us-east-1
 
-                    kubectl apply -f deployment.yml
-                    kubectl apply -f service.yml
+            echo "Updating kubeconfig..."
+            aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
 
-                    kubectl get pods
-                    kubectl get svc
-                """
-            }
+            echo "Deploying to EKS..."
+            kubectl apply -f deployment.yml
+            kubectl apply -f service.yml
+
+            echo "Deployment status:"
+            kubectl get pods
+            kubectl get svc
+            '''
         }
     }
+}
+
 
     post {
         always {
