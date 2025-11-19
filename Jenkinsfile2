@@ -34,11 +34,10 @@ pipeline {
                     sh '''
                     echo "Running SonarQube analysis..."
                     $SCANNER_HOME/bin/sonar-scanner \
-                      -Dsonar.projectKey=BMS \
-                      -Dsonar.projectName=BMS \
-                      -Dsonar.sources=bookmyshow-app \
-                      -Dsonar.java.binaries=bookmyshow-app \
-                      -Dsonar.exclusions=**/node_modules/**,**/*.yaml,**/*.yml
+                        -Dsonar.projectKey=BMS \
+                        -Dsonar.projectName=BMS \
+                        -Dsonar.sources=bookmyshow-app \
+                        -Dsonar.exclusions=**/node_modules/**,**/*.yaml,**/*.yml
                     '''
                 }
             }
@@ -46,7 +45,7 @@ pipeline {
 
         stage('Skip Quality Gate') {
             steps {
-                echo "Skipping Quality Gate to avoid pipeline delays."
+                echo "Skipping Quality Gate for better performance."
             }
         }
 
@@ -54,29 +53,22 @@ pipeline {
             steps {
                 sh '''
                 cd bookmyshow-app
-
-                if [ -f package.json ]; then
-                    echo "Installing dependencies..."
-                    rm -rf node_modules package-lock.json
-                    npm install --quiet
-                else
-                    echo "Error: package.json not found!"
-                    exit 1
-                fi
+                echo "Installing NPM dependencies..."
+                rm -rf node_modules package-lock.json
+                npm install --quiet
                 '''
             }
         }
 
-        stage('OWASP FS Scan') {
+        stage('OWASP FS Scan (FAST MODE)') {
             steps {
-                echo "Running OWASP DependencyCheck (FAST MODE)..."
                 dependencyCheck additionalArguments: '''
-                    --scan bookmyshow-app
-                    --disableYarnAudit
-                    --disableNodeAudit
-                    --disableNvd
-                    --disableRetireJS
+                    --scan bookmyshow-app 
+                    --disableNvd 
+                    --disableRetireJS 
                     --disableOssIndex
+                    --disableYarnAudit 
+                    --disableNodeAudit
                 ''',
                 odcInstallation: 'DP-Check'
 
@@ -86,7 +78,7 @@ pipeline {
 
         stage('Trivy FS Scan') {
             steps {
-                sh 'trivy fs . > trivyfs.txt'
+                sh 'trivy fs bookmyshow-app > trivyfs.txt'
             }
         }
 
@@ -98,7 +90,7 @@ pipeline {
                         echo "Building Docker image..."
                         docker build -t $DOCKER_IMAGE -f bookmyshow-app/Dockerfile bookmyshow-app
 
-                        echo "Pushing Docker image..."
+                        echo "Pushing image to Docker Hub..."
                         docker push $DOCKER_IMAGE
                         '''
                     }
@@ -110,13 +102,13 @@ pipeline {
             steps {
                 script {
                     sh '''
-                    echo "Verifying AWS authentication..."
+                    echo "Verifying AWS credentials..."
                     aws sts get-caller-identity
 
-                    echo "Configuring kubectl..."
+                    echo "Updating kubeconfig..."
                     aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
-                    echo "Deploying resources to EKS..."
+                    echo "Deploying manifests..."
                     kubectl apply -f deployment.yml
                     kubectl apply -f service.yml
 
