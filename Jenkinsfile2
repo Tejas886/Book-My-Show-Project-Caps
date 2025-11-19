@@ -2,113 +2,39 @@ pipeline {
     agent any
 
     tools {
-        nodejs 'nodejs25'                    // ✔ Correct NodeJS name
-        maven 'maven3'                       // ✔ Correct Maven name
-        dockerTool 'docker-latest'           // ✔ Correct Docker tool name
-        'dependency-check' 'odc'             // ✔ Correct tool type for OWASP DC
-        hudson.plugins.sonar.SonarRunnerInstallation 'sonarqube-scanner'   // ✔ Correct SonarScanner type
+        nodejs 'nodejs25'
+        maven  'maven3'
+        'dependency-check' 'odc'
+        'hudson.plugins.sonar.SonarRunnerInstallation' 'sonarqube-scanner'
+        dockerTool 'docker-latest'
     }
 
     environment {
-        DOCKER_HUB = credentials('docker-creds')
-        SONAR_TOKEN = credentials('sonar-creds')
-        AWS_CREDS = credentials('aws-creds')
-        SONAR_HOST_URL = 'http://3.80.91.197:9000'     // change if needed
+        AWS_ACCESS_KEY_ID     = credentials('aws-creds')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-creds')
+        DOCKER_USERNAME       = credentials('docker-creds')
+        DOCKER_PASSWORD       = credentials('docker-creds')
+        SONAR_TOKEN           = credentials('sonar-creds')
     }
 
     stages {
 
-        stage('Clean Workspace') {
-            steps {
-                cleanWs()
-            }
-        }
-
         stage('Checkout Code') {
             steps {
+                cleanWs()
                 git branch: 'main',
                     url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
             }
         }
 
-        stage('Install Dependencies (Fast)') {
+        stage('Install Dependencies Fast') {
             steps {
-                sh "npm install --silent"
+                sh 'npm install --silent'
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('sonar-server') {
+                withSonarQubeEnv('sonarqube') {
                     sh """
-                    sonar-scanner \
-                      -Dsonar.projectKey=bookmyshow \
-                      -Dsonar.sources=. \
-                      -Dsonar.host.url=$SONAR_HOST_URL \
-                      -Dsonar.login=$SONAR_TOKEN
-                    """
-                }
-            }
-        }
-
-        stage('Quality Gate') {
-            steps {
-                script {
-                    timeout(time: 3, unit: 'MINUTES') {
-                        waitForQualityGate abortPipeline: true
-                    }
-                }
-            }
-        }
-
-        stage('OWASP Dependency Check (Fast)') {
-            steps {
-                sh """
-                  dependency-check.sh --scan . \
-                    --format HTML \
-                    --out odc-report
-                """
-            }
-        }
-
-        stage('Trivy Scan (Fast)') {
-            steps {
-                sh """
-                    trivy fs . > trivy-report.txt || true
-                """
-            }
-        }
-
-        stage('Docker Build & Push (Fast)') {
-            steps {
-                sh """
-                    echo "$DOCKER_HUB_PSW" | docker login -u "$DOCKER_HUB_USR" --password-stdin
-                    docker build -t tejas886/bookmyshow:latest .
-                    docker push tejas886/bookmyshow:latest
-                """
-            }
-        }
-
-        stage('Deploy to EKS (Fast)') {
-            steps {
-                withAWS(credentials: 'aws-creds', region: 'us-east-1') {
-                    sh """
-                        aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
-                        kubectl set image deployment/bookmyshow bookmyshow=tejas886/bookmyshow:latest
-                        kubectl rollout restart deployment/bookmyshow
-                    """
-                }
-            }
-        }
-    }
-
-    post {
-        always {
-            emailext(
-                to: 'tejastejasa@gmail.com',
-                subject: "Build Status: ${currentBuild.currentResult}",
-                body: "Pipeline finished with status: ${currentBuild.currentResult}"
-            )
-        }
-    }
-}
+                       sonar-scanner \
