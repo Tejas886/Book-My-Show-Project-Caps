@@ -1,25 +1,22 @@
 pipeline {
-    // Use agent that has aws, kubectl, docker, npm installed.
-    // Change the label to the node where you installed aws-cli and kubectl (e.g. "ubuntu").
-    agent { label 'ubuntu' }
+
+    agent any
 
     tools {
-        jdk 'jdk17'        // your configured JDK tool name
-        maven 'maven3'     // your configured Maven tool name
-        nodejs 'nodejs25'  // your configured NodeJS tool name
+        jdk 'jdk17'
+        maven 'maven3'
+        nodejs 'nodejs25'
     }
 
     environment {
-        SCANNER_HOME     = tool 'sonarqube-scanner'   // name in Jenkins global tools
-        DOCKER_IMAGE     = 'tejasgowramma123/bms-app:latest'
-        AWS_REGION       = 'us-east-1'
+        SCANNER_HOME = tool 'sonarqube-scanner'
+        DOCKER_IMAGE = 'tejasgowramma123/bms-app:latest'
+        AWS_REGION = 'us-east-1'
         EKS_CLUSTER_NAME = 'bookmyshow-eks'
-
-        // File created by trivy stage (attached to email)
-        TRIVY_OUTPUT = 'trivyfs.txt'
     }
 
     stages {
+
         stage('Clean Workspace') {
             steps { cleanWs() }
         }
@@ -34,131 +31,98 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('sonarserver') {
-                    sh """
-                      ${SCANNER_HOME}/bin/sonar-scanner \
-                        -Dsonar.projectKey=BMS \
-                        -Dsonar.sources=bookmyshow-app \
-                        -Dsonar.exclusions=**/node_modules/**
-                    """
+                    sh '''
+                    $SCANNER_HOME/bin/sonar-scanner \
+                      -Dsonar.projectKey=BMS \
+                      -Dsonar.sources=bookmyshow-app \
+                      -Dsonar.exclusions=**/node_modules/**
+                    '''
                 }
             }
         }
 
         stage('Skip Quality Gate (Fast)') {
-            steps { echo "Skipping quality gate check for faster pipeline." }
+            steps {
+                echo "Skipping quality gate check for faster pipeline."
+            }
         }
 
         stage('Install Dependencies') {
             steps {
-                dir('bookmyshow-app') {
-                    sh '''
-                      rm -rf node_modules package-lock.json || true
-                      npm ci --silent || npm install --silent
-                    '''
-                }
+                sh '''
+                cd bookmyshow-app
+                rm -rf node_modules package-lock.json
+                npm install --quiet
+                '''
             }
         }
 
-        stage('OWASP Dependency-Check (scan)') {
+        /* ---------------- OWASP FS Scan (FIXED) ---------------- */
+        stage('OWASP FS Scan') {
             steps {
-                // Ensure the Dependency-Check tool installation name in Jenkins is 'odc'
-                // If your tool name differs, replace odc below with that name.
-                script {
-                    // run the dependency-check analysis (plugin step)
-                    dependencyCheck additionalArguments: """
-                        --scan bookmyshow-app
-                        --format XML
-                        --out .
-                        --disableAssembly
-                        --noupdate
-                    """,
-                    odcInstallation: 'odc'   // MUST match the Dependency-Check tool name in Manage Jenkins -> Tools
-                }
-            }
-            post {
-                always {
-                    // publish the dependency-check XML if produced
-                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
-                    // archive results for later inspection
-                    archiveArtifacts artifacts: '**/dependency-check-report.*', allowEmptyArchive: true
-                }
+                dependencyCheck additionalArguments: '''
+                    --scan bookmyshow-app
+                    --format XML
+                    --disableAssembly
+                    --noupdate
+                ''',
+                odcInstallation: 'odc'    // <-- YOUR TOOL NAME
+
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
 
+        /* ---------------- TRIVY FS Scan ---------------- */
         stage('Trivy FS Scan') {
             steps {
-                sh "trivy fs bookmyshow-app > ${TRIVY_OUTPUT} || true"
-                archiveArtifacts artifacts: "${TRIVY_OUTPUT}", allowEmptyArchive: true
+                sh '''
+                trivy fs bookmyshow-app > trivyfs.txt
+                '''
             }
         }
 
+        /* ---------------- DOCKER ---------------- */
         stage('Docker Build & Push') {
             steps {
                 script {
-                    // use docker credentials configured in Jenkins (username/password)
                     withDockerRegistry(credentialsId: 'docker-creds') {
-                        sh """
-                          docker build -t ${DOCKER_IMAGE} -f bookmyshow-app/Dockerfile bookmyshow-app
-                          docker push ${DOCKER_IMAGE}
-                        """
+                        sh '''
+                        docker build -t $DOCKER_IMAGE -f bookmyshow-app/Dockerfile bookmyshow-app
+                        docker push $DOCKER_IMAGE
+                        '''
                     }
                 }
             }
         }
 
+        /* ---------------- DEPLOY TO EKS (FIXED) ---------------- */
         stage('Deploy to EKS') {
             steps {
-                // Use the AWS creds stored in Jenkins (must be stored as username=AWS_ACCESS_KEY_ID, password=AWS_SECRET_ACCESS_KEY)
-                // Replace 'aws-creds' with your credentials ID if different.
-                withCredentials([usernamePassword(credentialsId: 'aws-creds',
-                                                  usernameVariable: 'AWS_ACCESS_KEY_ID',
-                                                  passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    sh '''
-                      set -x
-                      # Export AWS credentials for aws-cli
-                      export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-                      export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-                      export AWS_DEFAULT_REGION=${AWS_REGION}
+                sh '''
+                echo "Configuring AWS & EKS..."
+                aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
-                      # Update kubeconfig for the cluster (adds context to ~/.kube/config)
-                      aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
+                echo "Applying Kubernetes manifests..."
+                kubectl apply -f bookmyshow-app/k8s/deployment.yml
+                kubectl apply -f bookmyshow-app/k8s/service.yml
 
-                      # Optionally confirm context
-                      kubectl config current-context
-
-                      # Apply deployment and service manifests (adjust paths if your manifests are in repo)
-                      kubectl apply -f bookmyshow-app/deployment.yml || true
-                      kubectl apply -f bookmyshow-app/service.yml || true
-
-                      # Show pods and services
-                      kubectl get pods --all-namespaces || true
-                      kubectl get svc --all-namespaces || true
-                    '''
-                }
-            }
-            post {
-                always {
-                    // collect kubectl state for debugging
-                    sh 'kubectl get pods -o wide --all-namespaces || true'
-                    archiveArtifacts artifacts: 'k8s-*.log', allowEmptyArchive: true
-                }
+                echo "Cluster Status:"
+                kubectl get pods
+                kubectl get svc
+                '''
             }
         }
     }
 
     post {
         always {
-            // Attach Trivy output and pipeline log to email
-            emailext (
-                subject: "BMS Pipeline Build - ${currentBuild.fullDisplayName} - ${currentBuild.currentResult}",
-                body: """Build: ${env.BUILD_URL}
-Result: ${currentBuild.currentResult}
-See Trivy output attached.
-""",
+            emailext(
+                subject: "BMS Pipeline Build - ${currentBuild.result}",
+                body: "Build completed: ${currentBuild.result}",
                 to: "tejastejasa@gmail.com",
                 attachLog: true,
-                attachmentsPattern: "${TRIVY_OUTPUT}"
+                attachmentsPattern: "trivyfs.txt"
             )
         }
     }
-}
+}                         
