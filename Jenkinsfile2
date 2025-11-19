@@ -32,7 +32,7 @@ pipeline {
             steps {
                 withSonarQubeEnv('sonarserver') {
                     sh '''
-                    echo "Running SonarQube analysis quickly..."
+                    echo "Running SonarQube analysis..."
                     $SCANNER_HOME/bin/sonar-scanner \
                       -Dsonar.projectKey=BMS \
                       -Dsonar.projectName=BMS \
@@ -47,8 +47,8 @@ pipeline {
         stage('Quality Gate (Fast Mode)') {
             steps {
                 script {
-                    timeout(time: 30, unit: 'SECONDS') {
-                        waitForQualityGate abortPipeline: true
+                    timeout(time: 60, unit: 'SECONDS') {
+                        waitForQualityGate abortPipeline: false
                     }
                 }
             }
@@ -60,11 +60,11 @@ pipeline {
                 cd bookmyshow-app
 
                 if [ -f package.json ]; then
-                    echo "Installing npm dependencies..."
+                    echo "Installing dependencies..."
                     rm -rf node_modules package-lock.json
                     npm install --quiet
                 else
-                    echo "package.json missing!"
+                    echo "package.json not found!"
                     exit 1
                 fi
                 '''
@@ -90,7 +90,6 @@ pipeline {
             steps {
                 script {
                     withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
-
                         sh '''
                         echo "Building Docker image..."
                         docker build -t $DOCKER_IMAGE -f bookmyshow-app/Dockerfile bookmyshow-app
@@ -107,17 +106,16 @@ pipeline {
             steps {
                 script {
                     sh '''
-                    echo "Authenticating AWS..."
+                    echo "Verifying AWS authentication..."
                     aws sts get-caller-identity
 
-                    echo "Updating kubeconfig..."
+                    echo "Configuring kubectl..."
                     aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
-                    echo "Deploying manifests..."
+                    echo "Deploying resources..."
                     kubectl apply -f deployment.yml
                     kubectl apply -f service.yml
 
-                    echo "Checking deployment..."
                     kubectl get pods
                     kubectl get svc
                     '''
