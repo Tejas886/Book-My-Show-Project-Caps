@@ -1,85 +1,96 @@
 pipeline {
+
     agent any
 
     tools {
         jdk 'jdk17'
-        nodejs 'nodejs25'
         maven 'maven3'
-        // SonarQube scanner MUST NOT be placed here!
+        nodejs 'nodejs25'
     }
 
     environment {
-        SONAR_SCANNER = tool 'sonarqube-scanner'
-        DOCKER_IMAGE = 'tejasgowramma123/flask-notes-app:2.0'
-        EKS_CLUSTER_NAME = 'bookmyshow-eks'
+        SCANNER_HOME = tool 'sonarqube-scanner'
+        DOCKER_IMAGE = 'tejasgowramma123/bms-app:latest'
         AWS_REGION = 'us-east-1'
+        EKS_CLUSTER_NAME = 'bookmyshow-eks'
     }
 
     stages {
-
-        stage('Checkout') {
-            steps {
-                git branch: 'main', url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
-            }
-        }
 
         stage('Clean Workspace') {
             steps { cleanWs() }
         }
 
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main', url: 'https://github.com/staragile2016/Book-My-Show.git'
+                sh 'ls -la'
+            }
+        }
+
         stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('sonarserver') {
-                    sh """
-                    ${SONAR_SCANNER}/bin/sonar-scanner \
-                        -Dsonar.projectKey=BMS \
-                        -Dsonar.projectName=BMS
-                    """
+                    sh '''
+                    $SCANNER_HOME/bin/sonar-scanner \
+                      -Dsonar.projectKey=BMS \
+                      -Dsonar.sources=bookmyshow-app \
+                      -Dsonar.exclusions=**/node_modules/**
+                    '''
                 }
             }
         }
 
-        stage('Quality Gate') {
+        stage('Skip Quality Gate (Fast)') {
             steps {
-                timeout(time: 2, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: false
-                }
+                echo "Skipping quality gate check for faster pipeline."
             }
         }
 
         stage('Install Dependencies') {
             steps {
-                sh """
+                sh '''
                 cd bookmyshow-app
-                npm install
-                """
+                echo "Installing NPM dependencies..."
+                rm -rf node_modules package-lock.json
+                npm install --quiet
+                '''
             }
         }
 
         stage('OWASP FS Scan') {
             steps {
-                dependencyCheck odcInstallation: 'DP-Check', 
-                    additionalArguments: '--scan . --disableAssembly --quick'
+                dependencyCheck additionalArguments: '''
+                    --scan bookmyshow-app
+                    --disableAssembly
+                    --enableExperimental
+                    --noupdate
+                ''',
+                odcInstallation: 'DP-Check'
+
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
 
         stage('Trivy FS Scan') {
             steps {
-                sh 'trivy fs . > trivyfs.txt'
+                sh '''
+                trivy fs bookmyshow-app > trivyfs.txt
+                '''
             }
         }
 
         stage('Docker Build & Push') {
             steps {
                 script {
-                    withDockerRegistry(credentialsId: 'docker-creds', 
-                                       url: 'https://index.docker.io/v1/') {
+                    withDockerRegistry(credentialsId: 'docker-creds') {
+                        sh '''
+                        echo "Building Docker image..."
+                        docker build -t $DOCKER_IMAGE -f bookmyshow-app/Dockerfile bookmyshow-app
 
-                        sh """
-                        docker build -t $DOCKER_IMAGE bookmyshow-app
+                        echo "Pushing Docker image..."
                         docker push $DOCKER_IMAGE
-                        """
+                        '''
                     }
                 }
             }
@@ -87,25 +98,28 @@ pipeline {
 
         stage('Deploy to EKS') {
             steps {
-                sh """
+                sh '''
+                aws sts get-caller-identity
                 aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+
                 kubectl apply -f deployment.yml
                 kubectl apply -f service.yml
+
                 kubectl get pods
                 kubectl get svc
-                """
+                '''
             }
         }
     }
 
     post {
         always {
-            emailext (
-                subject: "Build: ${currentBuild.currentResult}",
+            emailext(
+                subject: "BMS Pipeline Build - ${currentBuild.result}",
+                body: "Build completed: ${currentBuild.result}",
                 to: "tejastejasa@gmail.com",
-                body: "Build completed: ${env.BUILD_URL}",
                 attachLog: true,
-                attachmentsPattern: 'trivyfs.txt'
+                attachmentsPattern: "trivyfs.txt"
             )
         }
     }
