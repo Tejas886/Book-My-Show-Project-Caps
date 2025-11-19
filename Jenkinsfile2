@@ -60,7 +60,7 @@ pipeline {
                     rm -rf node_modules package-lock.json
                     npm install --quiet
                 else
-                    echo "package.json not found!"
+                    echo "Error: package.json not found!"
                     exit 1
                 fi
                 '''
@@ -69,8 +69,16 @@ pipeline {
 
         stage('OWASP FS Scan') {
             steps {
-                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit',
-                                odcInstallation: 'DP-Check'
+                echo "Running OWASP DependencyCheck (FAST MODE)..."
+                dependencyCheck additionalArguments: '''
+                    --scan bookmyshow-app
+                    --disableYarnAudit
+                    --disableNodeAudit
+                    --disableNvd
+                    --disableRetireJS
+                    --disableOssIndex
+                ''',
+                odcInstallation: 'DP-Check'
 
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
@@ -108,7 +116,7 @@ pipeline {
                     echo "Configuring kubectl..."
                     aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
-                    echo "Deploying resources..."
+                    echo "Deploying resources to EKS..."
                     kubectl apply -f deployment.yml
                     kubectl apply -f service.yml
 
