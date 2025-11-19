@@ -14,6 +14,7 @@ pipeline {
     }
 
     stages {
+
         stage('Clean Workspace') {
             steps {
                 cleanWs()
@@ -23,17 +24,18 @@ pipeline {
         stage('Checkout from Git') {
             steps {
                 git branch: 'main', url: 'https://github.com/staragile2016/Book-My-Show.git'
-                sh 'ls -la'  // Verify files after checkout
+                sh 'ls -la'
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('sonarserver') {
-                    sh ''' 
-                    $SCANNER_HOME/bin/sonarqube-scanner \
+                    sh '''
+                    $SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectKey=BMS \
                         -Dsonar.projectName=BMS \
-                        -Dsonar.projectKey=BMS
+                        -Dsonar.sources=.
                     '''
                 }
             }
@@ -42,7 +44,7 @@ pipeline {
         stage('Quality Gate') {
             steps {
                 script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'sonar-creds'
+                    waitForQualityGate abortPipeline: false
                 }
             }
         }
@@ -51,12 +53,13 @@ pipeline {
             steps {
                 sh '''
                 cd bookmyshow-app
-                ls -la  # Verify package.json exists
+                ls -la
+
                 if [ -f package.json ]; then
-                    rm -rf node_modules package-lock.json  # Remove old dependencies
-                    npm install  # Install fresh dependencies
+                    rm -rf node_modules package-lock.json
+                    npm install
                 else
-                    echo "Error: package.json not found in bookmyshow-app!"
+                    echo "Error: package.json not found!"
                     exit 1
                 fi
                 '''
@@ -65,7 +68,9 @@ pipeline {
 
         stage('OWASP FS Scan') {
             steps {
-                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit',
+                                odcInstallation: 'DP-Check'
+
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
@@ -80,11 +85,11 @@ pipeline {
             steps {
                 script {
                     withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
-                        sh ''' 
+                        sh '''
                         echo "Building Docker image..."
                         docker build --no-cache -t $DOCKER_IMAGE -f bookmyshow-app/Dockerfile bookmyshow-app
 
-                        echo "Pushing Docker image to Docker Hub..."
+                        echo "Pushing Docker image..."
                         docker push $DOCKER_IMAGE
                         '''
                     }
@@ -99,17 +104,13 @@ pipeline {
                     echo "Verifying AWS credentials..."
                     aws sts get-caller-identity
 
-                    echo "Configuring kubectl for EKS cluster..."
+                    echo "Updating kubeconfig..."
                     aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
-                    echo "Verifying kubeconfig..."
-                    kubectl config view
-
-                    echo "Deploying application to EKS..."
+                    echo "Deploying to EKS..."
                     kubectl apply -f deployment.yml
                     kubectl apply -f service.yml
 
-                    echo "Verifying deployment..."
                     kubectl get pods
                     kubectl get svc
                     '''
@@ -120,13 +121,18 @@ pipeline {
 
     post {
         always {
-            emailext attachLog: true,
-                subject: "'${currentBuild.result}'",
-                body: "Project: ${env.JOB_NAME}<br/>" +
-                      "Build Number: ${env.BUILD_NUMBER}<br/>" +
-                      "URL: ${env.BUILD_URL}<br/>",
+            emailext(
+                attachLog: true,
+                subject: "'${currentBuild.result}' - BookMyShow Pipeline",
+                body: """
+                Project: ${env.JOB_NAME}<br/>
+                Build Number: ${env.BUILD_NUMBER}<br/>
+                Status: ${currentBuild.result}<br/>
+                URL: ${env.BUILD_URL}<br/>
+                """,
                 to: 'tejastejasa@gmail.com',
                 attachmentsPattern: 'trivyfs.txt'
+            )
         }
     }
 }
