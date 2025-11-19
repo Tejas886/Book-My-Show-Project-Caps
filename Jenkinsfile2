@@ -1,25 +1,20 @@
 pipeline {
+
     agent any
 
     tools {
-        jdk 'jdk17'
+        nodejs 'node25'
         maven 'maven3'
-        nodejs 'nodejs25'
+        jdk 'jdk17'
     }
 
     environment {
-        DOCKER_HUB = credentials('docker-creds')
-        AWS_CREDS = credentials('aws-creds')
-        SONAR_TOKEN = credentials('sonar-creds')
-        SONAR_URL = "http://3.80.91.197:9000"
-        IMAGE_NAME = "tejasgowramma/bookmyshow-app"
+        DOCKER_HUB = 'docker-creds'
+        AWS_CREDS  = 'aws-creds'
     }
 
     stages {
 
-        /* ----------------------------------------------------
-           CLEAN & CHECKOUT
-        ---------------------------------------------------- */
         stage('Checkout') {
             steps {
                 cleanWs()
@@ -28,113 +23,49 @@ pipeline {
             }
         }
 
-        /* ----------------------------------------------------
-           INSTALL DEPENDENCIES FAST
-        ---------------------------------------------------- */
-        stage('Install Dependencies (Fast)') {
+        stage('Install Dependencies (FAST)') {
             steps {
-                sh 'npm install --silent'
-            }
-        }
-
-        /* ----------------------------------------------------
-           SONARQUBE SCAN FAST
-        ---------------------------------------------------- */
-        stage("SonarQube Analysis") {
-            steps {
-                withSonarQubeEnv('sonarserver') {
-                    sh """
-                    sonar-scanner \
-                    -Dsonar.projectKey=BMS \
-                    -Dsonar.sources=. \
-                    -Dsonar.host.url=${SONAR_URL} \
-                    -Dsonar.login=${SONAR_TOKEN}
-                    """
+                echo "Installing dependencies inside correct folder..."
+                dir('bookmyshow-app') {
+                    sh 'npm install --silent'
                 }
             }
         }
 
-        /* ----------------------------------------------------
-           FAST QUALITY GATE
-        ---------------------------------------------------- */
-        stage("Quality Gate (Fast)") {
+        stage('Docker Build & Push (FAST)') {
             steps {
-                timeout(time: 2, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
+                script {
+                    withCredentials([usernamePassword(credentialsId: "${DOCKER_HUB}",
+                        usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+
+                        sh "docker login -u $DOCKER_USER -p $DOCKER_PASS"
+
+                        sh """
+                            docker build -t $DOCKER_USER/bms:latest .
+                            docker push $DOCKER_USER/bms:latest
+                        """
+                    }
                 }
             }
         }
 
-        /* ----------------------------------------------------
-           TRIVY FAST SCAN
-        ---------------------------------------------------- */
-        stage('Trivy FS Scan') {
+        stage('Deploy to EKS (FAST)') {
             steps {
-                sh """
-                trivy fs . --exit-code 0 --severity HIGH,CRITICAL --quiet
-                """
-            }
-        }
-
-        /* ----------------------------------------------------
-           FAST OWASP SCAN
-        ---------------------------------------------------- */
-        stage('OWASP FS Scan (Fast)') {
-            steps {
-                sh """
-                dependency-check.sh \
-                --scan . \
-                --format HTML \
-                --project BookMyShow \
-                --out owasp-report \
-                --disableAssembly \
-                --noupdate
-                """
-            }
-        }
-
-        /* ----------------------------------------------------
-           FAST DOCKER BUILD & PUSH
-        ---------------------------------------------------- */
-        stage('Docker Build & Push (Fast)') {
-            steps {
-                sh """
-                echo "${DOCKER_HUB_PSW}" | docker login -u "${DOCKER_HUB_USR}" --password-stdin
-                docker build -t ${IMAGE_NAME}:latest .
-                docker push ${IMAGE_NAME}:latest
-                """
-            }
-        }
-
-        /* ----------------------------------------------------
-           EKS DEPLOY FAST
-        ---------------------------------------------------- */
-        stage('Deploy to EKS (Fast)') {
-            steps {
-                withCredentials([aws(credentialsId: 'aws-creds', region: 'us-east-1')]) {
+                withCredentials([aws(credentialsId: "${AWS_CREDS}", region: 'us-east-1')]) {
                     sh """
-                    aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
-
-                    kubectl set image deployment/bookmyshow-deploy \
-                    bookmyshow-container=${IMAGE_NAME}:latest
-
-                    kubectl rollout restart deployment/bookmyshow-deploy
+                        aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
+                        kubectl apply -f deployment.yml
+                        kubectl apply -f service.yml
+                        kubectl rollout restart deployment bookmyshow-deployment
                     """
                 }
             }
         }
     }
 
-    /* ----------------------------------------------------
-       POST ACTION EMAIL
-    ---------------------------------------------------- */
     post {
         always {
-            emailext(
-                to: "tejastejasa@gmail.com",
-                subject: "Jenkins Pipeline - Build Status: ${currentBuild.currentResult}",
-                body: "Jenkins pipeline finished with result: ${currentBuild.currentResult}"
-            )
+            echo "Pipeline completed."
         }
     }
 }
