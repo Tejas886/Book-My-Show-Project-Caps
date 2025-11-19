@@ -2,32 +2,32 @@ pipeline {
     agent any
 
     tools {
+        maven 'maven3'
         nodejs 'nodejs25'
-        maven  'maven3'
-        'dependency-check' 'odc'
-        'hudson.plugins.sonar.SonarRunnerInstallation' 'sonarqube-scanner'
         dockerTool 'docker-latest'
+        'dependency-check' 'odc'
+        SonarQubeScanner 'sonarqube-scanner'
     }
 
     environment {
-        AWS_ACCESS_KEY_ID     = credentials('aws-creds')
-        AWS_SECRET_ACCESS_KEY = credentials('aws-creds')
-        DOCKER_USERNAME       = credentials('docker-creds')
-        DOCKER_PASSWORD       = credentials('docker-creds')
-        SONAR_TOKEN           = credentials('sonar-creds')
+        DOCKER_USER   = credentials('docker-creds')
+        SONAR_TOKEN   = credentials('sonar-creds')
+        AWS_CREDS     = credentials('aws-creds')
+        EMAIL         = credentials('emailkey')
+        REGISTRY      = "tejasgowramma123"
+        IMAGE_NAME    = "bookmyshow"
     }
 
     stages {
 
-        stage('Checkout Code') {
+        stage('Checkout') {
             steps {
                 cleanWs()
-                git branch: 'main',
-                    url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
+                git branch: 'main', url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
             }
         }
 
-        stage('Install Dependencies Fast') {
+        stage('Install Dependencies (Fast)') {
             steps {
                 sh 'npm install --silent'
             }
@@ -35,6 +35,67 @@ pipeline {
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('sonarqube') {
+                withSonarQubeEnv('MySonar') {
                     sh """
-                       sonar-scanner \
+                    sonar-scanner \
+                    -Dsonar.projectKey=bookmyshow \
+                    -Dsonar.sources=. \
+                    -Dsonar.host.url=http://3.80.91.197:9000 \
+                    -Dsonar.login=$SONAR_TOKEN
+                    """
+                }
+            }
+        }
+
+        stage("Quality Gate (Fast)") {
+            steps {
+                timeout(time: 2, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('OWASP Scan (Fast)') {
+            steps {
+                sh """
+                dependency-check.sh \
+                --project "BookMyShow" \
+                --scan . \
+                --format XML \
+                --out reports/
+                """
+            }
+        }
+
+        stage('Docker Build & Push (Fast)') {
+            steps {
+                sh """
+                docker login -u $DOCKER_USER_USR -p $DOCKER_USER_PSW
+                docker build -t $REGISTRY/$IMAGE_NAME:latest .
+                docker push $REGISTRY/$IMAGE_NAME:latest
+                """
+            }
+        }
+
+        stage('Deploy to EKS (Fast)') {
+            steps {
+                sh """
+                aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
+
+                kubectl set image deployment/bookmyshow bookmyshow=$REGISTRY/$IMAGE_NAME:latest
+                kubectl rollout restart deployment/bookmyshow
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            emailext(
+                to: 'tejastejasa@gmail.com',
+                subject: "BMS Pipeline Finished",
+                body: "Pipeline completed. Check Jenkins for details."
+            )
+        }
+    }
+}
