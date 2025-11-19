@@ -1,16 +1,17 @@
 pipeline {
-
     agent any
 
     tools {
-        nodejs 'node25'
+        nodejs 'nodejs25'
         maven 'maven3'
         jdk 'jdk17'
+        hudson.plugins.sonar.SonarRunnerInstallation 'sonarqube-scanner'
+        dependencyCheck 'odc'
     }
 
     environment {
-        DOCKER_HUB = 'docker-creds'
-        AWS_CREDS  = 'aws-creds'
+        DOCKER_HUB = credentials('docker-hub')
+        AWS = credentials('aws-creds')
     }
 
     stages {
@@ -18,54 +19,90 @@ pipeline {
         stage('Checkout') {
             steps {
                 cleanWs()
-                git branch: 'main',
-                    url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
+                git branch: 'main', url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
             }
         }
 
         stage('Install Dependencies (FAST)') {
             steps {
-                echo "Installing dependencies inside correct folder..."
                 dir('bookmyshow-app') {
-                    sh 'npm install --silent'
+                    sh '''
+                        echo "FAST NPM INSTALL..."
+                        npm install --silent --no-audit --prefer-offline
+                    '''
                 }
             }
         }
 
-        stage('Docker Build & Push (FAST)') {
+        stage('SonarQube') {
+            steps {
+                withSonarQubeEnv('sonarserver') {
+                    sh '''
+                        sonar-scanner \
+                        -Dsonar.projectKey=BMS \
+                        -Dsonar.sources=bookmyshow-app \
+                        -Dsonar.exclusions=**/node_modules/**
+                    '''
+                }
+            }
+        }
+
+        stage('Quality Gate (FAST)') {
+            steps {
+                timeout(time: 30, unit: 'SECONDS') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('OWASP FS Scan (FAST)') {
+            steps {
+                dependencyCheckAnalyzer odcInstallation: 'odc',
+                    scanPath: 'bookmyshow-app',
+                    outputDirectory: 'odc-report',
+                    isQuickEnabled: true
+            }
+        }
+
+        stage('Trivy FS Scan') {
+            steps {
+                sh 'trivy fs --severity CRITICAL bookmyshow-app'
+            }
+        }
+
+        stage('Docker Build & Push') {
             steps {
                 script {
-                    withCredentials([usernamePassword(credentialsId: "${DOCKER_HUB}",
-                        usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-
-                        sh "docker login -u $DOCKER_USER -p $DOCKER_PASS"
-
-                        sh """
-                            docker build -t $DOCKER_USER/bms:latest .
-                            docker push $DOCKER_USER/bms:latest
-                        """
+                    sh '''
+                        docker build -t tejas886/bookmyshow:latest bookmyshow-app
+                    '''
+                    withDockerRegistry(credentialsId: 'docker-hub', url: '') {
+                        sh '''
+                            docker push tejas886/bookmyshow:latest
+                        '''
                     }
                 }
             }
         }
 
-        stage('Deploy to EKS (FAST)') {
+        stage('Deploy to EKS') {
             steps {
-                withCredentials([aws(credentialsId: "${AWS_CREDS}", region: 'us-east-1')]) {
-                    sh """
-                        aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
-                        kubectl apply -f deployment.yml
-                        kubectl apply -f service.yml
-                        kubectl rollout restart deployment bookmyshow-deployment
-                    """
-                }
+                sh '''
+                    aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
+                    kubectl apply -f deployment.yml
+                    kubectl apply -f service.yml
+                '''
             }
         }
     }
 
     post {
         always {
-            echo "Pipeline completed."
+            emailext(
+                to: "tejastejasa@gmail.com",
+                subject: "Pipeline Completed",
+                body: "Pipeline finished"
+            )
         }
     }
 }
