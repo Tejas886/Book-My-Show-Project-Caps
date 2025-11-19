@@ -4,94 +4,88 @@ pipeline {
     tools {
         nodejs 'nodejs25'
         maven 'maven3'
-        hudson.plugins.sonar.SonarRunnerInstallation 'sonarqube-scanner'
-        org.jenkinsci.plugins.DependencyCheck.tools.DependencyCheckInstallation 'odc'
+        dependency-check 'odc'
         dockerTool 'docker-latest'
+        sonarqubeScanner 'sonarqube-scanner'
     }
 
     environment {
         DOCKER_HUB = credentials('docker-creds')
-        AWS_CREDS  = credentials('aws-creds')
-        SONARQUBE_TOKEN = credentials('sonar-token')
-        REGISTRY = "tejastejas/bookmyshow"
-        IMAGE_TAG = "latest"
+        SONAR_TOKEN = credentials('sonar-creds')
+        AWS_CREDS = credentials('aws-creds')
+        IMAGE = "tejastejas/bookmyshow-fast"
+        TAG = "latest"
+        CLUSTER_NAME = "bookmyshow-eks"
+        REGION = "us-east-1"
     }
 
     stages {
 
-        stage('Checkout') {
+        stage('Checkout Code') {
             steps {
                 cleanWs()
-                git branch: 'main',
-                    url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
+                git branch: 'main', url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
             }
         }
 
         stage('Install Dependencies (Fast)') {
             steps {
-                echo "Installing NPM packages fast mode..."
                 sh """
-                   cd bookmyshow-app
-                   npm install --silent
+                    npm install --silent
                 """
             }
         }
 
-        stage('SonarQube Analysis (Fast)') {
+        stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('sonarserver') {
-                    sh '''
+                withSonarQubeEnv('sonarqube-server') {
+                    sh """
                         sonar-scanner \
-                          -Dsonar.projectKey=BMS \
-                          -Dsonar.sources=bookmyshow-app \
-                          -Dsonar.exclusions=**/node_modules/** \
-                          -Dsonar.token=$SONARQUBE_TOKEN
-                    '''
+                        -Dsonar.projectKey=bookmyshow \
+                        -Dsonar.sources=. \
+                        -Dsonar.host.url=http://3.80.91.197:9000 \
+                        -Dsonar.login=$SONAR_TOKEN
+                    """
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 2, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
                 }
             }
         }
 
         stage('OWASP FS Scan (Fast)') {
             steps {
-                sh '''
-                    dependency-check.sh \
-                    --project "BMS" \
-                    --scan bookmyshow-app \
-                    --format HTML \
-                    --noupdate \
-                    --out ./odc-report
-                '''
-            }
-        }
-
-        stage('Trivy FS Scan (Fast)') {
-            steps {
-                sh '''
-                    trivy fs --scanners vuln --exit-code 0 .
-                '''
+                sh """
+                    dependency-check.sh --scan . --format ALL --out owasp-report
+                """
             }
         }
 
         stage('Docker Build & Push (Fast)') {
             steps {
-                script {
-                    sh """
-                        docker login -u $DOCKER_HUB_USR -p $DOCKER_HUB_PSW
-                        docker build -t $REGISTRY:$IMAGE_TAG .
-                        docker push $REGISTRY:$IMAGE_TAG
-                    """
-                }
+                sh """
+                    echo "$DOCKER_HUB_PSW" | docker login -u "$DOCKER_HUB_USR" --password-stdin
+                    docker build -t $IMAGE:$TAG .
+                    docker push $IMAGE:$TAG
+                """
             }
         }
 
         stage('Deploy to EKS (Fast)') {
             steps {
-                sh '''
-                    aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
+                withAWS(credentials: 'aws-creds', region: 'us-east-1') {
+                    sh """
+                        aws eks update-kubeconfig --region $REGION --name $CLUSTER_NAME
 
-                    kubectl set image deployment/bookmyshow \
-                    bookmyshow=$REGISTRY:$IMAGE_TAG
-                '''
+                        kubectl set image deployment/bookmyshow bookmyshow=$IMAGE:$TAG -n default || \
+                        kubectl apply -f k8s/deployment.yaml
+                    """
+                }
             }
         }
     }
@@ -99,8 +93,8 @@ pipeline {
     post {
         always {
             emailext(
-                to: 'tejastejasa@gmail.com',
-                subject: "BookMyShow Pipeline: ${currentBuild.currentResult}",
+                to: "tejastejasa@gmail.com",
+                subject: "BookMyShow Pipeline Status: ${currentBuild.currentResult}",
                 body: "Pipeline finished with status: ${currentBuild.currentResult}"
             )
         }
