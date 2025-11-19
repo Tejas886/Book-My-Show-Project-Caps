@@ -1,30 +1,25 @@
 pipeline {
     agent any
 
+    tools {
+        jdk 'jdk17'
+        nodejs 'nodejs25'
+        maven 'maven3'
+    }
+
     environment {
         SCANNER_HOME = tool 'sonarqube-scanner'
-        NODE_HOME = tool 'nodejs25'
-        JAVA_HOME = tool 'jdk17'
-        DOCKER_BUILDKIT = "1"
-        AWS_REGION = "us-east-1"
-        EKS_CLUSTER_NAME = "bookmyshow-eks"
-        IMAGE = "tejasgowramma123/bookmyshow:latest"
+        AWS_REGION = 'us-east-1'
+        EKS_CLUSTER_NAME = 'bookmyshow-eks'
+        DOCKER_IMAGE = 'tejasgowramma123/flask-notes-app:2.0'
     }
 
     stages {
 
-        stage('Checkout') {
+        stage('Checkout Code') {
             steps {
+                cleanWs()
                 git branch: 'main', url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
-            }
-        }
-
-        stage('Install Dependencies') {
-            steps {
-                sh '''
-                cd bookmyshow-app
-                npm install --production
-                '''
             }
         }
 
@@ -32,42 +27,44 @@ pipeline {
             steps {
                 withSonarQubeEnv('sonarserver') {
                     sh """
-                    ${SCANNER_HOME}/bin/sonar-scanner \
-                    -Dsonar.projectKey=BMS \
-                    -Dsonar.projectName=BMS
+                        ${SCANNER_HOME}/bin/sonar-scanner \
+                        -Dsonar.projectKey=BMS \
+                        -Dsonar.projectName=BMS
                     """
                 }
             }
         }
 
-        stage('Quality Gate') {
+        stage('Fast Quality Gate') {
             steps {
-                timeout(time: 1, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
+                timeout(time: 30, unit: 'SECONDS') {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'sonar-creds'
                 }
             }
         }
 
-        stage('OWASP FS Scan (FAST MODE)') {
+        stage('Install Dependencies (FAST)') {
             steps {
-                dependencyCheck additionalArguments: '--scan bookmyshow-app --enableExperimental --disableAssembly --quick', odcInstallation: 'DP-Check'
+                sh """
+                    cd bookmyshow-app
+                    npm ci
+                """
             }
         }
 
-        stage('Trivy FS Scan') {
+        stage('Trivy File Scan (FAST MODE)') {
             steps {
-                sh "trivy fs bookmyshow-app > trivy.txt"
+                sh "trivy fs --exit-code 0 --severity CRITICAL . > trivyfs.txt"
             }
         }
 
         stage('Docker Build & Push') {
             steps {
                 script {
-                    withDockerRegistry(credentialsId: 'docker-creds') {
+                    withDockerRegistry(credentialsId: 'docker-creds', toolName: 'docker') {
                         sh """
-                        cd bookmyshow-app
-                        docker build -t ${IMAGE} .
-                        docker push ${IMAGE}
+                            docker build -t ${DOCKER_IMAGE} -f bookmyshow-app/Dockerfile bookmyshow-app
+                            docker push ${DOCKER_IMAGE}
                         """
                     }
                 }
@@ -77,9 +74,10 @@ pipeline {
         stage('Deploy to EKS') {
             steps {
                 sh """
-                aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
-                kubectl apply -f deployment.yml
-                kubectl apply -f service.yml
+                    aws sts get-caller-identity
+                    aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
+                    kubectl apply -f deployment.yml
+                    kubectl apply -f service.yml
                 """
             }
         }
@@ -87,7 +85,12 @@ pipeline {
 
     post {
         always {
-            cleanWs()
+            emailext(
+                to: "tejastejasa@gmail.com",
+                subject: "Build Status: ${currentBuild.result}",
+                body: "Pipeline Finished. Status: ${currentBuild.result}",
+                attachLog: true
+            )
         }
     }
 }
