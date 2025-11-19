@@ -33,9 +33,9 @@ pipeline {
                 withSonarQubeEnv('sonarserver') {
                     sh '''
                     $SCANNER_HOME/bin/sonar-scanner \
-                      -Dsonar.projectKey=BMS \
-                      -Dsonar.sources=bookmyshow-app \
-                      -Dsonar.exclusions=**/node_modules/**
+                    -Dsonar.projectKey=BMS \
+                    -Dsonar.sources=bookmyshow-app \
+                    -Dsonar.exclusions=**/node_modules/**
                     '''
                 }
             }
@@ -57,31 +57,25 @@ pipeline {
             }
         }
 
-        /* ---------------- OWASP FS Scan (FIXED) ---------------- */
+        /* ----------- FIXED OWASP ----------- */
         stage('OWASP FS Scan') {
             steps {
                 dependencyCheck additionalArguments: '''
                     --scan bookmyshow-app
                     --format XML
-                    --disableAssembly
-                    --noupdate
                 ''',
-                odcInstallation: 'odc'    // <-- YOUR TOOL NAME
+                odcInstallation: 'odc'
 
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
 
-        /* ---------------- TRIVY FS Scan ---------------- */
         stage('Trivy FS Scan') {
             steps {
-                sh '''
-                trivy fs bookmyshow-app > trivyfs.txt
-                '''
+                sh 'trivy fs bookmyshow-app > trivyfs.txt'
             }
         }
 
-        /* ---------------- DOCKER ---------------- */
         stage('Docker Build & Push') {
             steps {
                 script {
@@ -95,21 +89,24 @@ pipeline {
             }
         }
 
-        /* ---------------- DEPLOY TO EKS (FIXED) ---------------- */
+        /* ----------- FIXED EKS DEPLOYMENT ----------- */
         stage('Deploy to EKS') {
             steps {
-                sh '''
-                echo "Configuring AWS & EKS..."
-                aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding',
+                                  credentialsId: 'aws-creds']]) {
 
-                echo "Applying Kubernetes manifests..."
-                kubectl apply -f bookmyshow-app/k8s/deployment.yml
-                kubectl apply -f bookmyshow-app/k8s/service.yml
+                    sh '''
+                    echo "Configuring AWS & EKS..."
+                    aws sts get-caller-identity
+                    aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
-                echo "Cluster Status:"
-                kubectl get pods
-                kubectl get svc
-                '''
+                    kubectl apply -f deployment.yml
+                    kubectl apply -f service.yml
+
+                    kubectl get pods
+                    kubectl get svc
+                    '''
+                }
             }
         }
     }
@@ -125,4 +122,4 @@ pipeline {
             )
         }
     }
-}                         
+}
