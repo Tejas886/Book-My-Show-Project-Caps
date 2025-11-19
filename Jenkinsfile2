@@ -1,26 +1,24 @@
 pipeline {
+
     agent any
 
     tools {
         maven 'maven3'
         nodejs 'nodejs25'
-        dockerTool 'docker-latest'
-        'dependency-check' 'odc'
-        SonarQubeScanner 'sonarqube-scanner'
+        jdk 'jdk17'
+        dependency-check 'ODC'
+        hudson.plugins.sonar.SonarRunnerInstallation 'sonarqube-scanner'
     }
 
     environment {
-        DOCKER_USER   = credentials('docker-creds')
-        SONAR_TOKEN   = credentials('sonar-creds')
-        AWS_CREDS     = credentials('aws-creds')
-        EMAIL         = credentials('emailkey')
-        REGISTRY      = "tejasgowramma123"
-        IMAGE_NAME    = "bookmyshow"
+        DOCKER_IMAGE = "tejasgowramma123/flask-notes-app:2.0"
+        AWS_REGION = "us-east-1"
+        EKS_CLUSTER = "bookmyshow-eks"
     }
 
     stages {
 
-        stage('Checkout') {
+        stage('Checkout Code') {
             steps {
                 cleanWs()
                 git branch: 'main', url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
@@ -29,62 +27,74 @@ pipeline {
 
         stage('Install Dependencies (Fast)') {
             steps {
-                sh 'npm install --silent'
+                sh '''
+                cd bookmyshow-app
+                npm install --silent
+                '''
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('MySonar') {
-                    sh """
+                withSonarQubeEnv('sonarserver') {
+                    sh '''
                     sonar-scanner \
-                    -Dsonar.projectKey=bookmyshow \
-                    -Dsonar.sources=. \
-                    -Dsonar.host.url=http://3.80.91.197:9000 \
-                    -Dsonar.login=$SONAR_TOKEN
-                    """
+                    -Dsonar.projectKey=BMS \
+                    -Dsonar.projectName=BMS \
+                    -Dsonar.sources=.
+                    '''
                 }
             }
         }
 
-        stage("Quality Gate (Fast)") {
+        stage('Quality Gate') {
             steps {
-                timeout(time: 2, unit: 'MINUTES') {
+                timeout(time: 1, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
                 }
             }
         }
 
-        stage('OWASP Scan (Fast)') {
+        stage('OWASP Dependency Check (Fast)') {
             steps {
-                sh """
-                dependency-check.sh \
-                --project "BookMyShow" \
-                --scan . \
-                --format XML \
-                --out reports/
-                """
+                sh '''
+                dependency-check.sh --scan . --format XML --out dependency-check-report.xml --quick
+                '''
             }
         }
 
-        stage('Docker Build & Push (Fast)') {
+        stage('Trivy Scan (Fast)') {
             steps {
-                sh """
-                docker login -u $DOCKER_USER_USR -p $DOCKER_USER_PSW
-                docker build -t $REGISTRY/$IMAGE_NAME:latest .
-                docker push $REGISTRY/$IMAGE_NAME:latest
-                """
+                sh '''
+                trivy fs . --exit-code 0 > trivyfs.txt
+                '''
             }
         }
 
-        stage('Deploy to EKS (Fast)') {
+        stage('Docker Build & Push') {
             steps {
-                sh """
-                aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
+                script {
+                    withDockerRegistry(credentialsId: 'docker-creds') {
+                        sh """
+                        docker build -t ${DOCKER_IMAGE} -f bookmyshow-app/Dockerfile bookmyshow-app
+                        docker push ${DOCKER_IMAGE}
+                        """
+                    }
+                }
+            }
+        }
 
-                kubectl set image deployment/bookmyshow bookmyshow=$REGISTRY/$IMAGE_NAME:latest
-                kubectl rollout restart deployment/bookmyshow
-                """
+        stage('Deploy to EKS') {
+            steps {
+                withAWS(region: "${AWS_REGION}", credentials: 'aws-creds') {
+                    sh """
+                    aws eks update-kubeconfig --name ${EKS_CLUSTER} --region ${AWS_REGION}
+                    kubectl apply -f deployment.yml
+                    kubectl apply -f service.yml
+                    kubectl get pods
+                    kubectl get svc
+                    """
+                }
             }
         }
     }
@@ -93,8 +103,9 @@ pipeline {
         always {
             emailext(
                 to: 'tejastejasa@gmail.com',
-                subject: "BMS Pipeline Finished",
-                body: "Pipeline completed. Check Jenkins for details."
+                subject: "Build ${currentBuild.result}",
+                body: "Build completed with status: ${currentBuild.result}",
+                attachLog: true
             )
         }
     }
