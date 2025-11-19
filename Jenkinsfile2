@@ -2,14 +2,11 @@ pipeline {
     agent any
 
     tools {
-        nodejs 'node14'
-        jdk 'jdk17'
-        maven 'maven3'
+        nodejs "node16"
     }
 
     environment {
-        AWS_DEFAULT_REGION = 'us-east-1'
-        SONAR_SCANNER_HOME = tool 'sonarqube-scanner'
+        AWS_CREDS = credentials('aws-creds')
     }
 
     stages {
@@ -22,11 +19,15 @@ pipeline {
 
         stage('Checkout Code') {
             steps {
-                git url: 'https://github.com/staragile2016/Book-My-Show.git', branch: 'main'
+                git branch: 'main', url: 'https://github.com/staragile2016/Book-My-Show.git'
                 sh 'ls -la'
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
-                with
+                withSonarQubeEnv('sonarserver') {
+                    sh """
+                        /var/lib/jenkins/tools/hudson.plugins.sonar.SonarRunnerInstallation/sonarqube-scanner/bin/sonar-scanner \
+                        -Dsonar.projectKey=BMS \
+                        -Dsonar.sources
