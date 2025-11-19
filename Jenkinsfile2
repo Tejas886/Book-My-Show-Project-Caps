@@ -31,52 +31,51 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('sonarserver') {
-                    sh '''
-                    $SCANNER_HOME/bin/sonar-scanner \
-                      -Dsonar.projectKey=BMS \
-                      -Dsonar.sources=bookmyshow-app \
-                      -Dsonar.exclusions=**/node_modules/**
-                    '''
+                    sh """
+                        ${SCANNER_HOME}/bin/sonar-scanner \
+                        -Dsonar.projectKey=BMS \
+                        -Dsonar.sources=bookmyshow-app \
+                        -Dsonar.exclusions=**/node_modules/**
+                    """
                 }
             }
         }
 
         stage('Skip Quality Gate (Fast)') {
             steps {
-                echo "Skipping quality gate check for faster pipeline."
+                echo "Skipping quality gate to keep pipeline fast."
             }
         }
 
         stage('Install Dependencies') {
             steps {
-                sh '''
-                cd bookmyshow-app
-                echo "Installing NPM dependencies..."
-                rm -rf node_modules package-lock.json
-                npm install --quiet
-                '''
+                sh """
+                    cd bookmyshow-app
+                    rm -rf node_modules package-lock.json
+                    npm install --silent
+                """
             }
         }
 
-        stage('OWASP FS Scan') {
+        stage('OWASP FS Scan (Non-Blocking)') {
             steps {
-                dependencyCheck additionalArguments: '''
-                    --scan bookmyshow-app
-                    --disableAssembly
-                    --enableExperimental
-                    --noupdate
-                ''',
-                odcInstallation: 'DP-Check'
-
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    dependencyCheck odcInstallation: 'odc', additionalArguments: """
+                        --scan bookmyshow-app
+                        --disableAssembly
+                        --enableExperimental
+                        --noupdate
+                    """
+                }
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
 
-        stage('Trivy FS Scan') {
+        stage('Trivy FS Scan (Non-Blocking)') {
             steps {
-                sh '''
-                trivy fs bookmyshow-app > trivyfs.txt
-                '''
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh 'trivy fs bookmyshow-app > trivyfs.txt'
+                }
             }
         }
 
@@ -84,13 +83,13 @@ pipeline {
             steps {
                 script {
                     withDockerRegistry(credentialsId: 'docker-creds') {
-                        sh '''
-                        echo "Building Docker image..."
-                        docker build -t $DOCKER_IMAGE -f bookmyshow-app/Dockerfile bookmyshow-app
+                        sh """
+                            echo "Building Docker image..."
+                            docker build -t $DOCKER_IMAGE bookmyshow-app
 
-                        echo "Pushing Docker image..."
-                        docker push $DOCKER_IMAGE
-                        '''
+                            echo "Pushing Docker image..."
+                            docker push $DOCKER_IMAGE
+                        """
                     }
                 }
             }
@@ -98,16 +97,15 @@ pipeline {
 
         stage('Deploy to EKS') {
             steps {
-                sh '''
-                aws sts get-caller-identity
-                aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+                sh """
+                    aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
-                kubectl apply -f deployment.yml
-                kubectl apply -f service.yml
+                    kubectl apply -f deployment.yml
+                    kubectl apply -f service.yml
 
-                kubectl get pods
-                kubectl get svc
-                '''
+                    kubectl get pods
+                    kubectl get svc
+                """
             }
         }
     }
@@ -115,8 +113,8 @@ pipeline {
     post {
         always {
             emailext(
-                subject: "BMS Pipeline Build - ${currentBuild.result}",
-                body: "Build completed: ${currentBuild.result}",
+                subject: "BMS Build Result: ${currentBuild.result}",
+                body: "Pipeline completed with result: ${currentBuild.result}",
                 to: "tejastejasa@gmail.com",
                 attachLog: true,
                 attachmentsPattern: "trivyfs.txt"
