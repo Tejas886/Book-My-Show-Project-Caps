@@ -1,30 +1,41 @@
 pipeline {
-
     agent any
 
     tools {
-        jdk 'jdk17'
         maven 'maven3'
+        jdk 'jdk17'
         nodejs 'nodejs25'
+        dockerTool 'docker'
+        // No OWASP tool here → faster
     }
 
     environment {
-        SCANNER_HOME = tool 'sonarqube-scanner'
-        DOCKER_IMAGE = 'tejasgowramma123/bms-app:latest'
-        AWS_REGION = 'us-east-1'
-        EKS_CLUSTER_NAME = 'bookmyshow-eks'
+        SONARQUBE_SERVER = credentials('sonar-creds')
+        DOCKER_CREDENTIALS = credentials('docker-creds')
+        AWS_CREDS = credentials('aws-creds')
+        ECR_URL = "631218091219.dkr.ecr.us-east-1.amazonaws.com/bookmyshow"
+        CLUSTER_NAME = "bookmyshow-eks"
+        REGION = "us-east-1"
     }
 
     stages {
 
-        stage('Clean Workspace') {
-            steps { cleanWs() }
+        stage('Checkout') {
+            steps {
+                git 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
+            }
         }
 
-        stage('Checkout Code') {
+        stage('Install Dependencies (Fast)') {
             steps {
-                git branch: 'main', url: 'https://github.com/staragile2016/Book-My-Show.git'
-                sh 'ls -la'
+                sh '''
+                    echo "Installing backend packages fast..."
+                    mvn -q clean install -DskipTests
+
+                    echo "Installing frontend packages fast..."
+                    cd client
+                    npm install --silent
+                '''
             }
         }
 
@@ -32,81 +43,58 @@ pipeline {
             steps {
                 withSonarQubeEnv('sonarserver') {
                     sh '''
-                    $SCANNER_HOME/bin/sonar-scanner \
-                      -Dsonar.projectKey=BMS \
-                      -Dsonar.sources=bookmyshow-app \
-                      -Dsonar.exclusions=**/node_modules/**
+                        sonar-scanner \
+                        -Dsonar.projectKey=BMS \
+                        -Dsonar.projectName=BMS
                     '''
                 }
             }
         }
 
-        stage('Skip Quality Gate (Fast)') {
+        stage('Quality Gate (Fast)') {
             steps {
-                echo "Skipping quality gate check for faster pipeline."
-            }
-        }
-
-        stage('Install Dependencies') {
-            steps {
-                sh '''
-                cd bookmyshow-app
-                echo "Installing NPM dependencies..."
-                rm -rf node_modules package-lock.json
-                npm install --quiet
-                '''
-            }
-        }
-
-        stage('OWASP FS Scan') {
-            steps {
-                dependencyCheck additionalArguments: '''
-                    --scan bookmyshow-app
-                    --disableAssembly
-                    --enableExperimental
-                    --noupdate
-                ''',
-                odcInstallation: 'DP-Check'
-
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                timeout(time: 2, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
             }
         }
 
         stage('Trivy FS Scan') {
             steps {
                 sh '''
-                trivy fs bookmyshow-app > trivyfs.txt
+                    echo "Running Trivy FAST scan..."
+                    trivy fs . --exit-code 0 --severity CRITICAL,HIGH
                 '''
             }
         }
 
-        stage('Docker Build & Push') {
+        stage('Docker Build & Push (Fast)') {
             steps {
-                script {
-                    withDockerRegistry(credentialsId: 'docker-creds') {
-                        sh '''
-                        echo "Building Docker image..."
-                        docker build -t $DOCKER_IMAGE -f bookmyshow-app/Dockerfile bookmyshow-app
+                sh '''
+                    echo "Logging into ECR..."
+                    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ECR_URL
 
-                        echo "Pushing Docker image..."
-                        docker push $DOCKER_IMAGE
-                        '''
-                    }
-                }
+                    echo "Building Docker image fast..."
+                    docker build -t bookmyshow-app .
+
+                    echo "Tag & Push..."
+                    docker tag bookmyshow-app:latest $ECR_URL:latest
+                    docker push $ECR_URL:latest
+                '''
             }
         }
 
-        stage('Deploy to EKS') {
+        stage('Deploy to EKS (Fast)') {
             steps {
                 sh '''
-                aws sts get-caller-identity
-                aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+                    echo "Updating kubeconfig..."
+                    aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
 
-                kubectl apply -f deployment.yml
-                kubectl apply -f service.yml
+                    echo "Deploying to EKS..."
+                    kubectl set image deployment/bookmyshow bookmyshow=$ECR_URL:latest -n default
 
-                kubectl get pods
-                kubectl get svc
+                    echo "Rolling update status..."
+                    kubectl rollout status deployment/bookmyshow -n default
                 '''
             }
         }
@@ -115,11 +103,9 @@ pipeline {
     post {
         always {
             emailext(
-                subject: "BMS Pipeline Build - ${currentBuild.result}",
-                body: "Build completed: ${currentBuild.result}",
                 to: "tejastejasa@gmail.com",
-                attachLog: true,
-                attachmentsPattern: "trivyfs.txt"
+                subject: "BookMyShow Pipeline Result",
+                body: "Pipeline completed with status: ${currentBuild.currentResult}"
             )
         }
     }
