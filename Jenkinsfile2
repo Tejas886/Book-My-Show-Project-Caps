@@ -2,96 +2,80 @@ pipeline {
     agent any
 
     tools {
-        nodejs 'nodejs25'        // You have this installed
-        jdk 'jdk17'              // You have this installed
-        maven 'maven3'           // Assuming maven name is maven3
-        dependencyCheck 'odc'    // The name of your OWASP installation
-        dockerTool 'docker'      // Your installed Docker CLI
+        jdk 'jdk17'
+        nodejs 'nodejs25'
+        dockerTool 'docker'
+        sonarscanner 'sonarqube-scanner'
     }
 
     environment {
-        DOCKERHUB_USER = "tejasgowramma123"
-        IMAGE_NAME     = "bookmyshow-app"
-        AWS_DEFAULT_REGION = "us-east-1"
+        SCANNER_HOME = tool 'sonarqube-scanner'
+        DOCKER_IMAGE = 'tejasgowramma123/flask-notes-app:2.0'
+        EKS_CLUSTER_NAME = 'bookmyshow-eks'
+        AWS_REGION = 'us-east-1'
     }
 
     stages {
 
-        stage('Checkout SCM') {
-            steps {
-                git 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
-            }
-        }
-
         stage('Clean Workspace') {
-            steps {
-                cleanWs()
-            }
+            steps { cleanWs() }
         }
 
-        stage('Checkout Frontend App') {
+        stage('Checkout') {
             steps {
-                git 'https://github.com/staragile2016/Book-My-Show.git'
-                sh 'ls -la'
+                git branch: 'main', url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
             }
         }
 
         stage('SonarQube Analysis') {
-            environment {
-                scannerHome = tool 'sonar-scanner'
-            }
             steps {
-                withSonarQubeEnv('sonarserver') {
+                withSonarQubeEnv('sonar-creds') {
                     sh """
-                        ${scannerHome}/bin/sonar-scanner \
+                        ${SCANNER_HOME}/bin/sonar-scanner \
                         -Dsonar.projectKey=BMS \
-                        -Dsonar.sources=bookmyshow-app \
-                        -Dsonar.exclusions=**/node_modules/**
+                        -Dsonar.projectName=BMS
                     """
                 }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                waitForQualityGate abortPipeline: true, credentialsId: 'sonar-creds'
             }
         }
 
         stage('Install Dependencies') {
             steps {
-                dir('bookmyshow-app') {
-                    sh """
-                        echo Installing npm dependencies...
+                timeout(time: 5, unit: 'MINUTES') {
+                    sh '''
+                        cd bookmyshow-app
                         rm -rf node_modules package-lock.json
-                        npm install --quiet
-                    """
+                        npm install
+                    '''
                 }
             }
         }
 
-        stage('OWASP FS Scan (FAST MODE)') {
+        stage('OWASP FS Scan') {
             steps {
-                dependencyCheck additionalArguments: '''
-                    --scan bookmyshow-app 
-                    --disableAssembly 
-                    --quick
-                '''
+                dependencyCheck odcInstallation: 'DP-Check',
+                    additionalArguments: '--scan bookmyshow-app --disableAssembly --quick'
             }
         }
 
         stage('Trivy FS Scan') {
             steps {
-                sh 'trivy fs --scanners vuln bookmyshow-app'
+                sh 'trivy fs . > trivyfs.txt || true'
             }
         }
 
         stage('Docker Build & Push') {
             steps {
-                script {
-
+                withDockerRegistry(credentialsId: 'docker-creds', toolName: 'docker') {
                     sh """
-                        echo Logging in to Docker Hub...
-                        echo '${env.DOCKERHUB_PASSWORD}' | docker login -u '${env.DOCKERHUB_USER}' --password-stdin
-                    """
-
-                    sh """
-                        docker build -t ${DOCKERHUB_USER}/${IMAGE_NAME}:latest bookmyshow-app
-                        docker push ${DOCKERHUB_USER}/${IMAGE_NAME}:latest
+                        docker build -t ${DOCKER_IMAGE} -f bookmyshow-app/Dockerfile bookmyshow-app
+                        docker push ${DOCKER_IMAGE}
                     """
                 }
             }
@@ -100,12 +84,9 @@ pipeline {
         stage('Deploy to EKS Cluster') {
             steps {
                 sh """
-                    aws eks update-kubeconfig --region ${AWS_DEFAULT_REGION} --name bmscluster
-
-                    kubectl set image deployment/bms-deployment \
-                        bmscontainer=${DOCKERHUB_USER}/${IMAGE_NAME}:latest
-
-                    kubectl rollout status deployment/bms-deployment
+                    aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
+                    kubectl apply -f deployment.yml
+                    kubectl apply -f service.yml
                 """
             }
         }
@@ -113,11 +94,11 @@ pipeline {
 
     post {
         always {
-            emailext(
-                to: "tejastejasa@gmail.com",
-                subject: "BMS Pipeline Completed",
-                body: "Pipeline completed. Check Jenkins for details."
-            )
+            emailext attachLog: true,
+                subject: "Build: ${currentBuild.result}",
+                body: "Job: ${JOB_NAME}<br/>Build Number: ${BUILD_NUMBER}<br/>URL: ${BUILD_URL}",
+                to: 'tejastejasa@gmail.com',
+                attachmentsPattern: 'trivyfs.txt'
         }
     }
 }
