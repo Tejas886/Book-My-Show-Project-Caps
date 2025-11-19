@@ -34,10 +34,10 @@ pipeline {
                     sh '''
                     echo "Running SonarQube analysis..."
                     $SCANNER_HOME/bin/sonar-scanner \
-                      -Dsonar.projectKey=BMS \
-                      -Dsonar.projectName=BMS \
-                      -Dsonar.sources=bookmyshow-app \
-                      -Dsonar.exclusions=**/node_modules/**,**/*.yaml,**/*.yml
+                        -Dsonar.projectKey=BMS \
+                        -Dsonar.projectName=BMS \
+                        -Dsonar.sources=bookmyshow-app \
+                        -Dsonar.exclusions=**/node_modules/**,**/*.yaml,**/*.yml
                     '''
                 }
             }
@@ -45,7 +45,7 @@ pipeline {
 
         stage('Skip Quality Gate') {
             steps {
-                echo "Skipping Quality Gate for speed"
+                echo "Skipping Quality Gate for speed."
             }
         }
 
@@ -64,9 +64,9 @@ pipeline {
             steps {
                 dependencyCheck additionalArguments: '''
                     --scan bookmyshow-app
-                    --disableYarnAudit 
-                    --disableNodeAudit
                     --noupdate
+                    --disableYarnAudit
+                    --disableNodeAudit
                 ''',
                 odcInstallation: 'DP-Check'
 
@@ -83,12 +83,9 @@ pipeline {
         stage('Docker Build & Push') {
             steps {
                 script {
-                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                    withDockerRegistry(credentialsId: 'docker-creds', toolName: 'docker') {
                         sh '''
-                        echo "Building Docker image..."
                         docker build -t $DOCKER_IMAGE -f bookmyshow-app/Dockerfile bookmyshow-app
-
-                        echo "Pushing Docker image..."
                         docker push $DOCKER_IMAGE
                         '''
                     }
@@ -100,16 +97,11 @@ pipeline {
             steps {
                 script {
                     sh '''
-                    echo "Verifying AWS credentials..."
                     aws sts get-caller-identity
-
-                    echo "Configuring kubectl..."
                     aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
-                    echo "Deploying application..."
                     kubectl apply -f deployment.yml
                     kubectl apply -f service.yml
-
                     kubectl get pods
                     kubectl get svc
                     '''
@@ -122,13 +114,8 @@ pipeline {
         always {
             emailext(
                 attachLog: true,
-                subject: "'${currentBuild.result}' - BookMyShow Pipeline",
-                body: """
-                Project: ${env.JOB_NAME}<br/>
-                Build Number: ${env.BUILD_NUMBER}<br/>
-                Result: ${currentBuild.result}<br/>
-                URL: ${env.BUILD_URL}<br/>
-                """,
+                subject: "Build Result: ${currentBuild.result}",
+                body: "Pipeline Completed.<br/>Result: ${currentBuild.result}",
                 to: 'tejastejasa@gmail.com'
             )
         }
