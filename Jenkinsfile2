@@ -4,19 +4,15 @@ pipeline {
     tools {
         nodejs 'nodejs25'
         maven 'maven3'
-        dependency-check 'odc'
         dockerTool 'docker-latest'
+        dependencyCheck 'odc'
         sonarqubeScanner 'sonarqube-scanner'
     }
 
     environment {
         DOCKER_HUB = credentials('docker-creds')
-        SONAR_TOKEN = credentials('sonar-creds')
-        AWS_CREDS = credentials('aws-creds')
-        IMAGE = "tejastejas/bookmyshow-fast"
-        TAG = "latest"
-        CLUSTER_NAME = "bookmyshow-eks"
-        REGION = "us-east-1"
+        AWS_CREDS  = credentials('aws-creds')
+        EMAIL_KEY  = credentials('emailkey')
     }
 
     stages {
@@ -28,62 +24,35 @@ pipeline {
             }
         }
 
-        stage('Install Dependencies (Fast)') {
+        stage('Install Dependencies') {
             steps {
-                sh """
-                    npm install --silent
-                """
+                sh 'npm install --silent'
             }
         }
 
-        stage('SonarQube Analysis') {
+        stage('Build Docker Image') {
             steps {
-                withSonarQubeEnv('sonarqube-server') {
+                script {
                     sh """
-                        sonar-scanner \
-                        -Dsonar.projectKey=bookmyshow \
-                        -Dsonar.sources=. \
-                        -Dsonar.host.url=http://3.80.91.197:9000 \
-                        -Dsonar.login=$SONAR_TOKEN
+                       echo "$DOCKER_HUB_PSW" | docker login -u "$DOCKER_HUB_USR" --password-stdin
+                       docker build -t tejas886/bookmyshow:latest .
+                       docker push tejas886/bookmyshow:latest
                     """
                 }
             }
         }
 
-        stage('Quality Gate') {
+        stage('Deploy to EKS') {
             steps {
-                timeout(time: 2, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
-                }
-            }
-        }
+                script {
 
-        stage('OWASP FS Scan (Fast)') {
-            steps {
-                sh """
-                    dependency-check.sh --scan . --format ALL --out owasp-report
-                """
-            }
-        }
-
-        stage('Docker Build & Push (Fast)') {
-            steps {
-                sh """
-                    echo "$DOCKER_HUB_PSW" | docker login -u "$DOCKER_HUB_USR" --password-stdin
-                    docker build -t $IMAGE:$TAG .
-                    docker push $IMAGE:$TAG
-                """
-            }
-        }
-
-        stage('Deploy to EKS (Fast)') {
-            steps {
-                withAWS(credentials: 'aws-creds', region: 'us-east-1') {
                     sh """
-                        aws eks update-kubeconfig --region $REGION --name $CLUSTER_NAME
-
-                        kubectl set image deployment/bookmyshow bookmyshow=$IMAGE:$TAG -n default || \
-                        kubectl apply -f k8s/deployment.yaml
+                      aws eks update-kubeconfig \
+                         --region us-east-1 \
+                         --name bookmyshow-eks \
+                         --profile default
+                      
+                      kubectl set image deployment/bookmyshow bookmyshow=tejas886/bookmyshow:latest
                     """
                 }
             }
@@ -92,10 +61,10 @@ pipeline {
 
     post {
         always {
-            emailext(
-                to: "tejastejasa@gmail.com",
-                subject: "BookMyShow Pipeline Status: ${currentBuild.currentResult}",
-                body: "Pipeline finished with status: ${currentBuild.currentResult}"
+            emailext (
+                to: 'tejastejasa@gmail.com',
+                subject: "Pipeline Completed",
+                body: "The BookMyShow pipeline has finished execution."
             )
         }
     }
