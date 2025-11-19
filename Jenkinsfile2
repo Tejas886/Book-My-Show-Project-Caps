@@ -4,15 +4,15 @@ pipeline {
     tools {
         nodejs 'nodejs25'
         maven 'maven3'
-        dockerTool 'docker-latest'
         dependencyCheck 'odc'
-        sonarqubeScanner 'sonarqube-scanner'
+        sonarScanner 'sonarqube-scanner'
+        dockerTool 'docker-latest'
     }
 
     environment {
         DOCKER_HUB = credentials('docker-creds')
-        AWS_CREDS  = credentials('aws-creds')
-        EMAIL_KEY  = credentials('emailkey')
+        SONAR_TOKEN = credentials('sonar-creds')
+        AWS_CREDS = credentials('aws-creds')
     }
 
     stages {
@@ -24,35 +24,69 @@ pipeline {
             }
         }
 
-        stage('Install Dependencies') {
+        stage('Install Dependencies (Fast)') {
             steps {
                 sh 'npm install --silent'
             }
         }
 
-        stage('Build Docker Image') {
+        stage('SonarQube Analysis') {
             steps {
-                script {
+                withSonarQubeEnv('sonarqube-scanner') {
                     sh """
-                       echo "$DOCKER_HUB_PSW" | docker login -u "$DOCKER_HUB_USR" --password-stdin
-                       docker build -t tejas886/bookmyshow:latest .
-                       docker push tejas886/bookmyshow:latest
+                        sonar-scanner \
+                        -Dsonar.projectKey=bookmyshow \
+                        -Dsonar.sources=. \
+                        -Dsonar.host.url=http://3.80.91.197:9000 \
+                        -Dsonar.login=${SONAR_TOKEN}
                     """
                 }
             }
         }
 
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 1, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('OWASP Dependency Scan') {
+            steps {
+                sh """
+                    dependency-check.sh \
+                    --scan . \
+                    --format HTML \
+                    --project bookmyshow \
+                    --out dependency-check-report
+                """
+            }
+        }
+
+        stage('Trivy FS Scan') {
+            steps {
+                sh 'trivy fs .'
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                sh """
+                    echo "${DOCKER_HUB_PSW}" | docker login -u "${DOCKER_HUB_USR}" --password-stdin
+                    docker build -t tejas886/bookmyshow:latest .
+                    docker push tejas886/bookmyshow:latest
+                """
+            }
+        }
+
         stage('Deploy to EKS') {
             steps {
-                script {
-
+                withAWS(credentials: 'aws-creds', region: 'us-east-1') {
                     sh """
-                      aws eks update-kubeconfig \
-                         --region us-east-1 \
-                         --name bookmyshow-eks \
-                         --profile default
-                      
-                      kubectl set image deployment/bookmyshow bookmyshow=tejas886/bookmyshow:latest
+                        aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
+                        kubectl apply -f k8s/deployment.yaml
+                        kubectl rollout restart deployment bookmyshow
                     """
                 }
             }
@@ -60,12 +94,15 @@ pipeline {
     }
 
     post {
-        always {
-            emailext (
-                to: 'tejastejasa@gmail.com',
-                subject: "Pipeline Completed",
-                body: "The BookMyShow pipeline has finished execution."
-            )
+        failure {
+            emailext to: "tejastejasa@gmail.com",
+            subject: "Pipeline Failed",
+            body: "BookMyShow Pipeline Failed!"
+        }
+        success {
+            emailext to: "tejastejasa@gmail.com",
+            subject: "Pipeline Success",
+            body: "BookMyShow Successfully Deployed to EKS!"
         }
     }
 }
