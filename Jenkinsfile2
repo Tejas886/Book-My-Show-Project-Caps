@@ -31,103 +31,94 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('sonarserver') {
-                    sh """
-                        ${SCANNER_HOME}/bin/sonar-scanner \
-                        -Dsonar.projectKey=BMS \
-                        -Dsonar.sources=bookmyshow-app \
-                        -Dsonar.exclusions=**/node_modules/**
-                    """
+                    sh '''
+                    $SCANNER_HOME/bin/sonar-scanner \
+                      -Dsonar.projectKey=BMS \
+                      -Dsonar.sources=bookmyshow-app \
+                      -Dsonar.exclusions=**/node_modules/**
+                    '''
                 }
             }
         }
 
         stage('Skip Quality Gate (Fast)') {
             steps {
-                echo "Skipping quality gate to keep pipeline fast."
+                echo "Skipping quality gate check for faster pipeline."
             }
         }
 
         stage('Install Dependencies') {
             steps {
-                sh """
-                    cd bookmyshow-app
-                    rm -rf node_modules package-lock.json
-                    npm install --silent
-                """
+                sh '''
+                cd bookmyshow-app
+                rm -rf node_modules package-lock.json
+                npm install --quiet
+                '''
             }
         }
 
-       stage('OWASP FS Scan') {
-    steps {
-        dependencyCheck additionalArguments: '''
-            --scan bookmyshow-app
-            --format XML
-            --out .
-            --disableAssembly
-            --enableExperimental
-            --noupdate
-        ''',
-        odcInstallation: 'odc'
-
-        dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
-    }
-}
-
-
-        stage('Trivy FS Scan (Non-Blocking)') {
+        /* ---------------- OWASP FS Scan (FIXED) ---------------- */
+        stage('OWASP FS Scan') {
             steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    sh 'trivy fs bookmyshow-app > trivyfs.txt'
-                }
+                dependencyCheck additionalArguments: '''
+                    --scan bookmyshow-app
+                    --format XML
+                    --disableAssembly
+                    --noupdate
+                ''',
+                odcInstallation: 'odc'    // <-- YOUR TOOL NAME
+
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
 
+        /* ---------------- TRIVY FS Scan ---------------- */
+        stage('Trivy FS Scan') {
+            steps {
+                sh '''
+                trivy fs bookmyshow-app > trivyfs.txt
+                '''
+            }
+        }
+
+        /* ---------------- DOCKER ---------------- */
         stage('Docker Build & Push') {
             steps {
                 script {
                     withDockerRegistry(credentialsId: 'docker-creds') {
-                        sh """
-                            echo "Building Docker image..."
-                            docker build -t $DOCKER_IMAGE bookmyshow-app
-
-                            echo "Pushing Docker image..."
-                            docker push $DOCKER_IMAGE
-                        """
+                        sh '''
+                        docker build -t $DOCKER_IMAGE -f bookmyshow-app/Dockerfile bookmyshow-app
+                        docker push $DOCKER_IMAGE
+                        '''
                     }
                 }
             }
         }
 
-       stage('Deploy to EKS') {
-    steps {
-        withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-            sh '''
-            echo "Setting AWS credentials..."
-            export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
-            export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
-            export AWS_DEFAULT_REGION=us-east-1
+        /* ---------------- DEPLOY TO EKS (FIXED) ---------------- */
+        stage('Deploy to EKS') {
+            steps {
+                sh '''
+                echo "Configuring AWS & EKS..."
+                aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
-            echo "Updating kubeconfig..."
-            aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
+                echo "Applying Kubernetes manifests..."
+                kubectl apply -f bookmyshow-app/k8s/deployment.yml
+                kubectl apply -f bookmyshow-app/k8s/service.yml
 
-            echo "Deploying to EKS..."
-            kubectl apply -f deployment.yml
-            kubectl apply -f service.yml
-
-            echo "Deployment status:"
-            kubectl get pods
-            kubectl get svc
-            '''
+                echo "Cluster Status:"
+                kubectl get pods
+                kubectl get svc
+                '''
+            }
         }
     }
-}
-
 
     post {
         always {
             emailext(
-                subject: "BMS Build Result: ${currentBuild.result}",
-                body: "Pipeline completed with result: ${currentBuild.result}",
+                subject: "BMS Pipeline Build - ${currentBuild.result}",
+                body: "Build completed: ${currentBuild.result}",
                 to: "tejastejasa@gmail.com",
                 attachLog: true,
                 attachmentsPattern: "trivyfs.txt"
