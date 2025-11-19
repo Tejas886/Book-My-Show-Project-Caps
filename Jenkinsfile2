@@ -34,10 +34,10 @@ pipeline {
                     sh '''
                     echo "Running SonarQube analysis..."
                     $SCANNER_HOME/bin/sonar-scanner \
-                        -Dsonar.projectKey=BMS \
-                        -Dsonar.projectName=BMS \
-                        -Dsonar.sources=bookmyshow-app \
-                        -Dsonar.exclusions=**/node_modules/**,**/*.yaml,**/*.yml
+                      -Dsonar.projectKey=BMS \
+                      -Dsonar.projectName=BMS \
+                      -Dsonar.sources=bookmyshow-app \
+                      -Dsonar.exclusions=**/node_modules/**,**/*.yaml,**/*.yml
                     '''
                 }
             }
@@ -45,7 +45,7 @@ pipeline {
 
         stage('Skip Quality Gate') {
             steps {
-                echo "Skipping Quality Gate for better performance."
+                echo "Skipping Quality Gate for speed"
             }
         }
 
@@ -63,12 +63,10 @@ pipeline {
         stage('OWASP FS Scan (FAST MODE)') {
             steps {
                 dependencyCheck additionalArguments: '''
-                    --scan bookmyshow-app 
-                    --disableNvd 
-                    --disableRetireJS 
-                    --disableOssIndex
+                    --scan bookmyshow-app
                     --disableYarnAudit 
                     --disableNodeAudit
+                    --noupdate
                 ''',
                 odcInstallation: 'DP-Check'
 
@@ -78,7 +76,7 @@ pipeline {
 
         stage('Trivy FS Scan') {
             steps {
-                sh 'trivy fs bookmyshow-app > trivyfs.txt'
+                sh 'trivy fs bookmyshow-app'
             }
         }
 
@@ -90,7 +88,7 @@ pipeline {
                         echo "Building Docker image..."
                         docker build -t $DOCKER_IMAGE -f bookmyshow-app/Dockerfile bookmyshow-app
 
-                        echo "Pushing image to Docker Hub..."
+                        echo "Pushing Docker image..."
                         docker push $DOCKER_IMAGE
                         '''
                     }
@@ -105,10 +103,10 @@ pipeline {
                     echo "Verifying AWS credentials..."
                     aws sts get-caller-identity
 
-                    echo "Updating kubeconfig..."
+                    echo "Configuring kubectl..."
                     aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
-                    echo "Deploying manifests..."
+                    echo "Deploying application..."
                     kubectl apply -f deployment.yml
                     kubectl apply -f service.yml
 
@@ -131,8 +129,7 @@ pipeline {
                 Result: ${currentBuild.result}<br/>
                 URL: ${env.BUILD_URL}<br/>
                 """,
-                to: 'tejastejasa@gmail.com',
-                attachmentsPattern: 'trivyfs.txt'
+                to: 'tejastejasa@gmail.com'
             )
         }
     }
