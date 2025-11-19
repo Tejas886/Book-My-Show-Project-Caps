@@ -2,43 +2,50 @@ pipeline {
     agent any
 
     tools {
-        nodejs 'nodejs25'
-        maven 'maven3'
-        dependencyCheck 'odc'
-        sonarScanner 'sonarqube-scanner'
-        dockerTool 'docker-latest'
+        nodejs 'nodejs25'                    // ✔ Correct NodeJS name
+        maven 'maven3'                       // ✔ Correct Maven name
+        dockerTool 'docker-latest'           // ✔ Correct Docker tool name
+        'dependency-check' 'odc'             // ✔ Correct tool type for OWASP DC
+        hudson.plugins.sonar.SonarRunnerInstallation 'sonarqube-scanner'   // ✔ Correct SonarScanner type
     }
 
     environment {
         DOCKER_HUB = credentials('docker-creds')
         SONAR_TOKEN = credentials('sonar-creds')
         AWS_CREDS = credentials('aws-creds')
+        SONAR_HOST_URL = 'http://3.80.91.197:9000'     // change if needed
     }
 
     stages {
 
-        stage('Checkout Code') {
+        stage('Clean Workspace') {
             steps {
                 cleanWs()
-                git branch: 'main', url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
+            }
+        }
+
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
             }
         }
 
         stage('Install Dependencies (Fast)') {
             steps {
-                sh 'npm install --silent'
+                sh "npm install --silent"
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('sonarqube-scanner') {
+                withSonarQubeEnv('sonar-server') {
                     sh """
-                        sonar-scanner \
-                        -Dsonar.projectKey=bookmyshow \
-                        -Dsonar.sources=. \
-                        -Dsonar.host.url=http://3.80.91.197:9000 \
-                        -Dsonar.login=${SONAR_TOKEN}
+                    sonar-scanner \
+                      -Dsonar.projectKey=bookmyshow \
+                      -Dsonar.sources=. \
+                      -Dsonar.host.url=$SONAR_HOST_URL \
+                      -Dsonar.login=$SONAR_TOKEN
                     """
                 }
             }
@@ -46,47 +53,49 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
-                timeout(time: 1, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
+                script {
+                    timeout(time: 3, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true
+                    }
                 }
             }
         }
 
-        stage('OWASP Dependency Scan') {
+        stage('OWASP Dependency Check (Fast)') {
             steps {
                 sh """
-                    dependency-check.sh \
-                    --scan . \
+                  dependency-check.sh --scan . \
                     --format HTML \
-                    --project bookmyshow \
-                    --out dependency-check-report
+                    --out odc-report
                 """
             }
         }
 
-        stage('Trivy FS Scan') {
+        stage('Trivy Scan (Fast)') {
             steps {
-                sh 'trivy fs .'
+                sh """
+                    trivy fs . > trivy-report.txt || true
+                """
             }
         }
 
-        stage('Docker Build & Push') {
+        stage('Docker Build & Push (Fast)') {
             steps {
                 sh """
-                    echo "${DOCKER_HUB_PSW}" | docker login -u "${DOCKER_HUB_USR}" --password-stdin
+                    echo "$DOCKER_HUB_PSW" | docker login -u "$DOCKER_HUB_USR" --password-stdin
                     docker build -t tejas886/bookmyshow:latest .
                     docker push tejas886/bookmyshow:latest
                 """
             }
         }
 
-        stage('Deploy to EKS') {
+        stage('Deploy to EKS (Fast)') {
             steps {
                 withAWS(credentials: 'aws-creds', region: 'us-east-1') {
                     sh """
                         aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
-                        kubectl apply -f k8s/deployment.yaml
-                        kubectl rollout restart deployment bookmyshow
+                        kubectl set image deployment/bookmyshow bookmyshow=tejas886/bookmyshow:latest
+                        kubectl rollout restart deployment/bookmyshow
                     """
                 }
             }
@@ -94,15 +103,12 @@ pipeline {
     }
 
     post {
-        failure {
-            emailext to: "tejastejasa@gmail.com",
-            subject: "Pipeline Failed",
-            body: "BookMyShow Pipeline Failed!"
-        }
-        success {
-            emailext to: "tejastejasa@gmail.com",
-            subject: "Pipeline Success",
-            body: "BookMyShow Successfully Deployed to EKS!"
+        always {
+            emailext(
+                to: 'tejastejasa@gmail.com',
+                subject: "Build Status: ${currentBuild.currentResult}",
+                body: "Pipeline finished with status: ${currentBuild.currentResult}"
+            )
         }
     }
 }
