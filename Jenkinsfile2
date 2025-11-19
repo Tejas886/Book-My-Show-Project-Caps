@@ -32,10 +32,10 @@ pipeline {
             steps {
                 withSonarQubeEnv('sonarserver') {
                     sh '''
-                    $SCANNER_HOME/bin/sonar-scanner \
-                      -Dsonar.projectKey=BMS \
-                      -Dsonar.sources=bookmyshow-app \
-                      -Dsonar.exclusions=**/node_modules/**
+                        $SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectKey=BMS \
+                        -Dsonar.sources=bookmyshow-app \
+                        -Dsonar.exclusions=**/node_modules/**
                     '''
                 }
             }
@@ -50,14 +50,14 @@ pipeline {
         stage('Install Dependencies') {
             steps {
                 sh '''
-                cd bookmyshow-app
-                rm -rf node_modules package-lock.json
-                npm install --quiet
+                    cd bookmyshow-app
+                    rm -rf node_modules package-lock.json
+                    npm install --quiet
                 '''
             }
         }
 
-        /* ---------------- OWASP FS Scan (FIXED) ---------------- */
+        /* ----------- FAST OWASP DEPENDENCY CHECK ----------- */
         stage('OWASP FS Scan') {
             steps {
                 dependencyCheck additionalArguments: '''
@@ -66,7 +66,7 @@ pipeline {
                     --disableAssembly
                     --noupdate
                 ''',
-                odcInstallation: 'odc'    // <-- YOUR TOOL NAME
+                odcInstallation: 'odc'
 
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
@@ -76,7 +76,7 @@ pipeline {
         stage('Trivy FS Scan') {
             steps {
                 sh '''
-                trivy fs bookmyshow-app > trivyfs.txt
+                    trivy fs bookmyshow-app > trivyfs.txt
                 '''
             }
         }
@@ -87,28 +87,27 @@ pipeline {
                 script {
                     withDockerRegistry(credentialsId: 'docker-creds') {
                         sh '''
-                        docker build -t $DOCKER_IMAGE -f bookmyshow-app/Dockerfile bookmyshow-app
-                        docker push $DOCKER_IMAGE
+                            docker build -t $DOCKER_IMAGE -f bookmyshow-app/Dockerfile bookmyshow-app
+                            docker push $DOCKER_IMAGE
                         '''
                     }
                 }
             }
         }
 
-        /* ---------------- DEPLOY TO EKS (FIXED) ---------------- */
+        /* ---------------- DEPLOY TO EKS ---------------- */
         stage('Deploy to EKS') {
             steps {
                 sh '''
-                echo "Configuring AWS & EKS..."
-                aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+                    echo "Configuring AWS..."
+                    aws eks --region $AWS_REGION update-kubeconfig --name $EKS_CLUSTER_NAME
 
-                echo "Applying Kubernetes manifests..."
-                kubectl apply -f bookmyshow-app/k8s/deployment.yml
-                kubectl apply -f bookmyshow-app/k8s/service.yml
+                    echo "Deploying to Kubernetes..."
+                    kubectl apply -f bookmyshow-app/k8s/deployment.yml
+                    kubectl apply -f bookmyshow-app/k8s/service.yml
 
-                echo "Cluster Status:"
-                kubectl get pods
-                kubectl get svc
+                    kubectl get pods
+                    kubectl get svc
                 '''
             }
         }
@@ -125,4 +124,4 @@ pipeline {
             )
         }
     }
-}                         
+}
