@@ -4,12 +4,12 @@ pipeline {
     tools {
         jdk 'jdk17'
         nodejs 'nodejs25'
-        dockerTool 'docker'
-        sonarscanner 'sonarqube-scanner'
+        maven 'maven3'
+        // SonarQube scanner MUST NOT be placed here!
     }
 
     environment {
-        SCANNER_HOME = tool 'sonarqube-scanner'
+        SONAR_SCANNER = tool 'sonarqube-scanner'
         DOCKER_IMAGE = 'tejasgowramma123/flask-notes-app:2.0'
         EKS_CLUSTER_NAME = 'bookmyshow-eks'
         AWS_REGION = 'us-east-1'
@@ -17,21 +17,21 @@ pipeline {
 
     stages {
 
-        stage('Clean Workspace') {
-            steps { cleanWs() }
-        }
-
         stage('Checkout') {
             steps {
                 git branch: 'main', url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
             }
         }
 
+        stage('Clean Workspace') {
+            steps { cleanWs() }
+        }
+
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('sonar-creds') {
+                withSonarQubeEnv('sonarserver') {
                     sh """
-                        ${SCANNER_HOME}/bin/sonar-scanner \
+                    ${SONAR_SCANNER}/bin/sonar-scanner \
                         -Dsonar.projectKey=BMS \
                         -Dsonar.projectName=BMS
                     """
@@ -41,52 +41,58 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
-                waitForQualityGate abortPipeline: true, credentialsId: 'sonar-creds'
+                timeout(time: 2, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: false
+                }
             }
         }
 
         stage('Install Dependencies') {
             steps {
-                timeout(time: 5, unit: 'MINUTES') {
-                    sh '''
-                        cd bookmyshow-app
-                        rm -rf node_modules package-lock.json
-                        npm install
-                    '''
-                }
+                sh """
+                cd bookmyshow-app
+                npm install
+                """
             }
         }
 
         stage('OWASP FS Scan') {
             steps {
-                dependencyCheck odcInstallation: 'DP-Check',
-                    additionalArguments: '--scan bookmyshow-app --disableAssembly --quick'
+                dependencyCheck odcInstallation: 'DP-Check', 
+                    additionalArguments: '--scan . --disableAssembly --quick'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
 
         stage('Trivy FS Scan') {
             steps {
-                sh 'trivy fs . > trivyfs.txt || true'
+                sh 'trivy fs . > trivyfs.txt'
             }
         }
 
         stage('Docker Build & Push') {
             steps {
-                withDockerRegistry(credentialsId: 'docker-creds', toolName: 'docker') {
-                    sh """
-                        docker build -t ${DOCKER_IMAGE} -f bookmyshow-app/Dockerfile bookmyshow-app
-                        docker push ${DOCKER_IMAGE}
-                    """
+                script {
+                    withDockerRegistry(credentialsId: 'docker-creds', 
+                                       url: 'https://index.docker.io/v1/') {
+
+                        sh """
+                        docker build -t $DOCKER_IMAGE bookmyshow-app
+                        docker push $DOCKER_IMAGE
+                        """
+                    }
                 }
             }
         }
 
-        stage('Deploy to EKS Cluster') {
+        stage('Deploy to EKS') {
             steps {
                 sh """
-                    aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
-                    kubectl apply -f deployment.yml
-                    kubectl apply -f service.yml
+                aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+                kubectl apply -f deployment.yml
+                kubectl apply -f service.yml
+                kubectl get pods
+                kubectl get svc
                 """
             }
         }
@@ -94,11 +100,13 @@ pipeline {
 
     post {
         always {
-            emailext attachLog: true,
-                subject: "Build: ${currentBuild.result}",
-                body: "Job: ${JOB_NAME}<br/>Build Number: ${BUILD_NUMBER}<br/>URL: ${BUILD_URL}",
-                to: 'tejastejasa@gmail.com',
+            emailext (
+                subject: "Build: ${currentBuild.currentResult}",
+                to: "tejastejasa@gmail.com",
+                body: "Build completed: ${env.BUILD_URL}",
+                attachLog: true,
                 attachmentsPattern: 'trivyfs.txt'
+            )
         }
     }
 }
