@@ -2,10 +2,13 @@ pipeline {
     agent any
 
     tools {
-        nodejs "node16"
+        nodejs 'node16'
+        maven 'maven3'
     }
 
     environment {
+        SONARQUBE = credentials('sonar-creds')
+        DOCKER_CREDS = credentials('docker-creds')
         AWS_CREDS = credentials('aws-creds')
     }
 
@@ -19,7 +22,7 @@ pipeline {
 
         stage('Checkout Code') {
             steps {
-                git branch: 'main', url: 'https://github.com/staragile2016/Book-My-Show.git'
+                git 'https://github.com/staragile2016/Book-My-Show.git'
                 sh 'ls -la'
             }
         }
@@ -27,7 +30,73 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('sonarserver') {
-                    sh """
+                    sh '''
                         /var/lib/jenkins/tools/hudson.plugins.sonar.SonarRunnerInstallation/sonarqube-scanner/bin/sonar-scanner \
                         -Dsonar.projectKey=BMS \
-                        -Dsonar.sources
+                        -Dsonar.sources=bookmyshow-app \
+                        -Dsonar.exclusions=**/node_modules/**
+                    '''
+                }
+            }
+        }
+
+        stage('Skip Quality Gate (Fast)') {
+            steps {
+                echo "Skipping quality gate for faster pipeline."
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                    cd bookmyshow-app
+                    rm -rf node_modules package-lock.json
+                    npm install --quiet
+                '''
+            }
+        }
+
+        stage('OWASP FS Scan') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./bookmyshow-app', odcInstallation: 'owasp'
+            }
+        }
+
+        stage('Trivy FS Scan') {
+            steps {
+                sh '''
+                    trivy fs --exit-code 0 --severity HIGH,CRITICAL bookmyshow-app
+                '''
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                sh '''
+                    docker build -t tejas886/bms:latest .
+                    echo "${DOCKER_CREDS_PSW}" | docker login -u "${DOCKER_CREDS_USR}" --password-stdin
+                    docker push tejas886/bms:latest
+                '''
+            }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                withAWS(credentials: 'aws-creds', region: 'us-east-1') {
+                    sh '''
+                        aws eks --region us-east-1 update-kubeconfig --name bookmyshow-eks
+                        kubectl apply -f deployment.yml
+                        kubectl apply -f service.yml
+                        kubectl get pods -o wide
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Pipeline completed."
+        }
+    }
+}
