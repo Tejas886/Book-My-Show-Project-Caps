@@ -2,56 +2,62 @@ pipeline {
     agent any
 
     tools {
-        maven 'maven3'
         jdk 'jdk17'
+        maven 'maven3'
         nodejs 'nodejs25'
-        dockerTool 'docker'
-        // No OWASP tool here → faster
     }
 
     environment {
-        SONARQUBE_SERVER = credentials('sonar-creds')
-        DOCKER_CREDENTIALS = credentials('docker-creds')
+        DOCKER_HUB = credentials('docker-creds')
         AWS_CREDS = credentials('aws-creds')
-        ECR_URL = "631218091219.dkr.ecr.us-east-1.amazonaws.com/bookmyshow"
-        CLUSTER_NAME = "bookmyshow-eks"
-        REGION = "us-east-1"
+        SONAR_TOKEN = credentials('sonar-creds')
+        SONAR_URL = "http://3.80.91.197:9000"
+        IMAGE_NAME = "tejasgowramma/bookmyshow-app"
     }
 
     stages {
 
+        /* ----------------------------------------------------
+           CLEAN & CHECKOUT
+        ---------------------------------------------------- */
         stage('Checkout') {
             steps {
-                git 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
+                cleanWs()
+                git branch: 'main',
+                    url: 'https://github.com/Tejas886/Book-My-Show-Project-Caps.git'
             }
         }
 
+        /* ----------------------------------------------------
+           INSTALL DEPENDENCIES FAST
+        ---------------------------------------------------- */
         stage('Install Dependencies (Fast)') {
             steps {
-                sh '''
-                    echo "Installing backend packages fast..."
-                    mvn -q clean install -DskipTests
-
-                    echo "Installing frontend packages fast..."
-                    cd client
-                    npm install --silent
-                '''
+                sh 'npm install --silent'
             }
         }
 
-        stage('SonarQube Analysis') {
+        /* ----------------------------------------------------
+           SONARQUBE SCAN FAST
+        ---------------------------------------------------- */
+        stage("SonarQube Analysis") {
             steps {
                 withSonarQubeEnv('sonarserver') {
-                    sh '''
-                        sonar-scanner \
-                        -Dsonar.projectKey=BMS \
-                        -Dsonar.projectName=BMS
-                    '''
+                    sh """
+                    sonar-scanner \
+                    -Dsonar.projectKey=BMS \
+                    -Dsonar.sources=. \
+                    -Dsonar.host.url=${SONAR_URL} \
+                    -Dsonar.login=${SONAR_TOKEN}
+                    """
                 }
             }
         }
 
-        stage('Quality Gate (Fast)') {
+        /* ----------------------------------------------------
+           FAST QUALITY GATE
+        ---------------------------------------------------- */
+        stage("Quality Gate (Fast)") {
             steps {
                 timeout(time: 2, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
@@ -59,53 +65,75 @@ pipeline {
             }
         }
 
+        /* ----------------------------------------------------
+           TRIVY FAST SCAN
+        ---------------------------------------------------- */
         stage('Trivy FS Scan') {
             steps {
-                sh '''
-                    echo "Running Trivy FAST scan..."
-                    trivy fs . --exit-code 0 --severity CRITICAL,HIGH
-                '''
+                sh """
+                trivy fs . --exit-code 0 --severity HIGH,CRITICAL --quiet
+                """
             }
         }
 
+        /* ----------------------------------------------------
+           FAST OWASP SCAN
+        ---------------------------------------------------- */
+        stage('OWASP FS Scan (Fast)') {
+            steps {
+                sh """
+                dependency-check.sh \
+                --scan . \
+                --format HTML \
+                --project BookMyShow \
+                --out owasp-report \
+                --disableAssembly \
+                --noupdate
+                """
+            }
+        }
+
+        /* ----------------------------------------------------
+           FAST DOCKER BUILD & PUSH
+        ---------------------------------------------------- */
         stage('Docker Build & Push (Fast)') {
             steps {
-                sh '''
-                    echo "Logging into ECR..."
-                    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ECR_URL
-
-                    echo "Building Docker image fast..."
-                    docker build -t bookmyshow-app .
-
-                    echo "Tag & Push..."
-                    docker tag bookmyshow-app:latest $ECR_URL:latest
-                    docker push $ECR_URL:latest
-                '''
+                sh """
+                echo "${DOCKER_HUB_PSW}" | docker login -u "${DOCKER_HUB_USR}" --password-stdin
+                docker build -t ${IMAGE_NAME}:latest .
+                docker push ${IMAGE_NAME}:latest
+                """
             }
         }
 
+        /* ----------------------------------------------------
+           EKS DEPLOY FAST
+        ---------------------------------------------------- */
         stage('Deploy to EKS (Fast)') {
             steps {
-                sh '''
-                    echo "Updating kubeconfig..."
+                withCredentials([aws(credentialsId: 'aws-creds', region: 'us-east-1')]) {
+                    sh """
                     aws eks update-kubeconfig --region us-east-1 --name bookmyshow-eks
 
-                    echo "Deploying to EKS..."
-                    kubectl set image deployment/bookmyshow bookmyshow=$ECR_URL:latest -n default
+                    kubectl set image deployment/bookmyshow-deploy \
+                    bookmyshow-container=${IMAGE_NAME}:latest
 
-                    echo "Rolling update status..."
-                    kubectl rollout status deployment/bookmyshow -n default
-                '''
+                    kubectl rollout restart deployment/bookmyshow-deploy
+                    """
+                }
             }
         }
     }
 
+    /* ----------------------------------------------------
+       POST ACTION EMAIL
+    ---------------------------------------------------- */
     post {
         always {
             emailext(
                 to: "tejastejasa@gmail.com",
-                subject: "BookMyShow Pipeline Result",
-                body: "Pipeline completed with status: ${currentBuild.currentResult}"
+                subject: "Jenkins Pipeline - Build Status: ${currentBuild.currentResult}",
+                body: "Jenkins pipeline finished with result: ${currentBuild.currentResult}"
             )
         }
     }
