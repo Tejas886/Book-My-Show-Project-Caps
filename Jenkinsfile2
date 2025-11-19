@@ -6,7 +6,7 @@ pipeline {
         maven 'maven3'
         nodejs 'nodejs25'
         jdk 'jdk17'
-        dependency-check 'ODC'
+        dependency-check 'odc'
         hudson.plugins.sonar.SonarRunnerInstallation 'sonarqube-scanner'
     }
 
