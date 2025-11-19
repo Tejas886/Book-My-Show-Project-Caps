@@ -16,9 +16,7 @@ pipeline {
     stages {
 
         stage('Clean Workspace') {
-            steps {
-                cleanWs()
-            }
+            steps { cleanWs() }
         }
 
         stage('Checkout from Git') {
@@ -32,21 +30,18 @@ pipeline {
             steps {
                 withSonarQubeEnv('sonarserver') {
                     sh '''
-                    echo "Running SonarQube analysis..."
                     $SCANNER_HOME/bin/sonar-scanner \
-                        -Dsonar.projectKey=BMS \
-                        -Dsonar.projectName=BMS \
-                        -Dsonar.sources=bookmyshow-app \
-                        -Dsonar.exclusions=**/node_modules/**,**/*.yaml,**/*.yml
+                      -Dsonar.projectKey=BMS \
+                      -Dsonar.projectName=BMS \
+                      -Dsonar.sources=bookmyshow-app \
+                      -Dsonar.exclusions=**/node_modules/**
                     '''
                 }
             }
         }
 
         stage('Skip Quality Gate') {
-            steps {
-                echo "Skipping Quality Gate for speed."
-            }
+            steps { echo "Skipping QG for speed" }
         }
 
         stage('Install Dependencies') {
@@ -63,10 +58,10 @@ pipeline {
         stage('OWASP FS Scan (FAST MODE)') {
             steps {
                 dependencyCheck additionalArguments: '''
-                    --scan bookmyshow-app
                     --noupdate
-                    --disableYarnAudit
+                    --scan bookmyshow-app
                     --disableNodeAudit
+                    --disableYarnAudit
                 ''',
                 odcInstallation: 'DP-Check'
 
@@ -76,7 +71,7 @@ pipeline {
 
         stage('Trivy FS Scan') {
             steps {
-                sh 'trivy fs bookmyshow-app'
+                sh 'trivy fs --scanners vuln bookmyshow-app > trivyfs.txt'
             }
         }
 
@@ -94,18 +89,15 @@ pipeline {
         }
 
         stage('Deploy to EKS Cluster') {
+            when { expression { return currentBuild.result != 'FAILURE' } }
             steps {
-                script {
-                    sh '''
-                    aws sts get-caller-identity
-                    aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
-
-                    kubectl apply -f deployment.yml
-                    kubectl apply -f service.yml
-                    kubectl get pods
-                    kubectl get svc
-                    '''
-                }
+                sh '''
+                aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+                kubectl apply -f deployment.yml
+                kubectl apply -f service.yml
+                kubectl get pods
+                kubectl get svc
+                '''
             }
         }
     }
@@ -114,9 +106,10 @@ pipeline {
         always {
             emailext(
                 attachLog: true,
-                subject: "Build Result: ${currentBuild.result}",
-                body: "Pipeline Completed.<br/>Result: ${currentBuild.result}",
-                to: 'tejastejasa@gmail.com'
+                subject: "'${currentBuild.result}' - BookMyShow Pipeline",
+                body: "Build completed: ${env.BUILD_URL}",
+                to: 'tejastejasa@gmail.com',
+                attachmentsPattern: 'trivyfs.txt'
             )
         }
     }
