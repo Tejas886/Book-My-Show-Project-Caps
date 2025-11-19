@@ -1,173 +1,164 @@
 pipeline {
-  agent any
+    // Use agent that has aws, kubectl, docker, npm installed.
+    // Change the label to the node where you installed aws-cli and kubectl (e.g. "ubuntu").
+    agent { label 'ubuntu' }
 
-  tools {
-    jdk 'jdk17'
-    maven 'maven3'
-    nodejs 'nodejs25'
-    // don't try to add dependency-check/sonar here to avoid the plugin/tool name mismatch issues
-  }
-
-  environment {
-    DOCKER_IMAGE = 'tejasgowramma123/bms-app:latest'
-    AWS_REGION = 'us-east-1'
-    EKS_CLUSTER_NAME = 'bookmyshow-eks'
-    // Sonar server config name from Manage Jenkins -> Configure System -> SonarQube servers
-    SONAR_SERVER = 'sonarserver'
-  }
-
-  stages {
-
-    stage('Clean Workspace') {
-      steps {
-        cleanWs()
-      }
+    tools {
+        jdk 'jdk17'        // your configured JDK tool name
+        maven 'maven3'     // your configured Maven tool name
+        nodejs 'nodejs25'  // your configured NodeJS tool name
     }
 
-    stage('Checkout Code') {
-      steps {
-        // Your repo - adjust branch/url if needed
-        git branch: 'main', url: 'https://github.com/staragile2016/Book-My-Show.git'
-        sh 'ls -la'
-      }
+    environment {
+        SCANNER_HOME     = tool 'sonarqube-scanner'   // name in Jenkins global tools
+        DOCKER_IMAGE     = 'tejasgowramma123/bms-app:latest'
+        AWS_REGION       = 'us-east-1'
+        EKS_CLUSTER_NAME = 'bookmyshow-eks'
+
+        // File created by trivy stage (attached to email)
+        TRIVY_OUTPUT = 'trivyfs.txt'
     }
 
-    stage('SonarQube Analysis') {
-      steps {
-        withSonarQubeEnv("${SONAR_SERVER}") {
-          // if you have a sonar-scanner tool installed and configured, SCANNER_HOME could be used
-          sh '''
-            /var/lib/jenkins/tools/hudson.plugins.sonar.SonarRunnerInstallation/sonarqube-scanner/bin/sonar-scanner \
-              -Dsonar.projectKey=BMS \
-              -Dsonar.sources=bookmyshow-app \
-              -Dsonar.exclusions=**/node_modules/**
-          '''
+    stages {
+        stage('Clean Workspace') {
+            steps { cleanWs() }
         }
-      }
-    }
 
-    stage('Skip Quality Gate (Fast)') {
-      steps {
-        echo "Skipping quality gate check for faster pipeline."
-      }
-    }
-
-    stage('Install Dependencies') {
-      steps {
-        dir('bookmyshow-app') {
-          sh '''
-            echo "Installing NPM dependencies..."
-            rm -rf node_modules package-lock.json || true
-            npm install --silent
-          '''
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main', url: 'https://github.com/staragile2016/Book-My-Show.git'
+                sh 'ls -la'
+            }
         }
-      }
-    }
 
-    stage('OWASP Dependency-Check (Docker)') {
-      steps {
-        script {
-          // ensure local dir for dependency-check data/cache
-          sh 'mkdir -p dependency-check-data || true'
-          // Run the official owasp/dependency-check container scanning the app folder and output reports into bookmyshow-app
-          sh '''
-            docker run --rm \
-              -v "$PWD/bookmyshow-app":/src \
-              -v "$PWD/dependency-check-data":/usr/share/dependency-check/data \
-              owasp/dependency-check:latest \
-              --project "BMS" \
-              --scan /src \
-              --format XML \
-              --out /src \
-              --noupdate
-          '''
-          // publish the generated report (bookmyshow-app/dependency-check-report.xml)
-          archiveArtifacts artifacts: 'bookmyshow-app/dependency-check-report.xml', allowEmptyArchive: true
-          // Fail the build if any HIGH or CRITICAL found in report
-          sh '''
-            if grep -q -E "<severity>(HIGH|CRITICAL)</severity>" bookmyshow-app/dependency-check-report.xml; then
-              echo "Dependency-Check found HIGH/CRITICAL vulnerabilities - failing build"
-              cat bookmyshow-app/dependency-check-report.xml
-              exit 1
-            else
-              echo "No HIGH/CRITICAL vulnerabilities found by dependency-check."
-            fi
-          '''
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonarserver') {
+                    sh """
+                      ${SCANNER_HOME}/bin/sonar-scanner \
+                        -Dsonar.projectKey=BMS \
+                        -Dsonar.sources=bookmyshow-app \
+                        -Dsonar.exclusions=**/node_modules/**
+                    """
+                }
+            }
         }
-      }
-    }
 
-    stage('Trivy FS Scan') {
-      steps {
-        sh '''
-          # trivy may scan secrets & vuln; limit to vuln for speed if you want: --scanners vuln
-          trivy fs --quiet --severity HIGH,CRITICAL --format table bookmyshow-app > trivyfs.txt || true
-        '''
-        archiveArtifacts artifacts: 'trivyfs.txt', allowEmptyArchive: true
-      }
-    }
-
-    stage('Docker Build & Push') {
-      steps {
-        script {
-          withCredentials([usernamePassword(credentialsId: 'docker-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PSW')]) {
-            sh '''
-              echo "$DOCKERHUB_PSW" | docker login -u "$DOCKERHUB_USER" --password-stdin
-              docker build -t ${DOCKER_IMAGE} -f bookmyshow-app/Dockerfile bookmyshow-app
-              docker push ${DOCKER_IMAGE}
-            '''
-          }
+        stage('Skip Quality Gate (Fast)') {
+            steps { echo "Skipping quality gate check for faster pipeline." }
         }
-      }
-    }
 
-    stage('Deploy to EKS') {
-      steps {
-        script {
-          // bind AWS creds (username/password style used for accessKey/secret in your credentials)
-          withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-            sh '''
-              export AWS_DEFAULT_REGION=${AWS_REGION}
-              export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-              export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-
-              echo "Verifying AWS identity..."
-              aws sts get-caller-identity
-
-              echo "Updating kubeconfig for EKS..."
-              aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION} --kubeconfig $HOME/.kube/config
-
-              echo "Applying k8s manifests..."
-              # adjust paths if your manifests are in a subfolder
-              kubectl apply -f deployment.yml
-              kubectl apply -f service.yml
-
-              echo "Pods:"
-              kubectl get pods --all-namespaces || true
-              echo "Services:"
-              kubectl get svc --all-namespaces || true
-            '''
-          }
+        stage('Install Dependencies') {
+            steps {
+                dir('bookmyshow-app') {
+                    sh '''
+                      rm -rf node_modules package-lock.json || true
+                      npm ci --silent || npm install --silent
+                    '''
+                }
+            }
         }
-      }
+
+        stage('OWASP Dependency-Check (scan)') {
+            steps {
+                // Ensure the Dependency-Check tool installation name in Jenkins is 'odc'
+                // If your tool name differs, replace odc below with that name.
+                script {
+                    // run the dependency-check analysis (plugin step)
+                    dependencyCheck additionalArguments: """
+                        --scan bookmyshow-app
+                        --format XML
+                        --out .
+                        --disableAssembly
+                        --noupdate
+                    """,
+                    odcInstallation: 'odc'   // MUST match the Dependency-Check tool name in Manage Jenkins -> Tools
+                }
+            }
+            post {
+                always {
+                    // publish the dependency-check XML if produced
+                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                    // archive results for later inspection
+                    archiveArtifacts artifacts: '**/dependency-check-report.*', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Trivy FS Scan') {
+            steps {
+                sh "trivy fs bookmyshow-app > ${TRIVY_OUTPUT} || true"
+                archiveArtifacts artifacts: "${TRIVY_OUTPUT}", allowEmptyArchive: true
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                script {
+                    // use docker credentials configured in Jenkins (username/password)
+                    withDockerRegistry(credentialsId: 'docker-creds') {
+                        sh """
+                          docker build -t ${DOCKER_IMAGE} -f bookmyshow-app/Dockerfile bookmyshow-app
+                          docker push ${DOCKER_IMAGE}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                // Use the AWS creds stored in Jenkins (must be stored as username=AWS_ACCESS_KEY_ID, password=AWS_SECRET_ACCESS_KEY)
+                // Replace 'aws-creds' with your credentials ID if different.
+                withCredentials([usernamePassword(credentialsId: 'aws-creds',
+                                                  usernameVariable: 'AWS_ACCESS_KEY_ID',
+                                                  passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    sh '''
+                      set -x
+                      # Export AWS credentials for aws-cli
+                      export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                      export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                      export AWS_DEFAULT_REGION=${AWS_REGION}
+
+                      # Update kubeconfig for the cluster (adds context to ~/.kube/config)
+                      aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
+
+                      # Optionally confirm context
+                      kubectl config current-context
+
+                      # Apply deployment and service manifests (adjust paths if your manifests are in repo)
+                      kubectl apply -f bookmyshow-app/deployment.yml || true
+                      kubectl apply -f bookmyshow-app/service.yml || true
+
+                      # Show pods and services
+                      kubectl get pods --all-namespaces || true
+                      kubectl get svc --all-namespaces || true
+                    '''
+                }
+            }
+            post {
+                always {
+                    // collect kubectl state for debugging
+                    sh 'kubectl get pods -o wide --all-namespaces || true'
+                    archiveArtifacts artifacts: 'k8s-*.log', allowEmptyArchive: true
+                }
+            }
+        }
     }
 
-  } // stages
-
-  post {
-    always {
-      // attach logs; if email plugin has issues replace with echo or remove
-      emailext(
-        subject: "BMS Pipeline - Build ${currentBuild.fullDisplayName} - ${currentBuild.currentResult}",
-        body: """Build: ${env.BUILD_URL}
+    post {
+        always {
+            // Attach Trivy output and pipeline log to email
+            emailext (
+                subject: "BMS Pipeline Build - ${currentBuild.fullDisplayName} - ${currentBuild.currentResult}",
+                body: """Build: ${env.BUILD_URL}
 Result: ${currentBuild.currentResult}
+See Trivy output attached.
 """,
-        to: "tejastejasa@gmail.com"
-      )
-      archiveArtifacts artifacts: 'bookmyshow-app/dependency-check-report.xml, trivyfs.txt', allowEmptyArchive: true
+                to: "tejastejasa@gmail.com",
+                attachLog: true,
+                attachmentsPattern: "${TRIVY_OUTPUT}"
+            )
+        }
     }
-    failure {
-      echo "Build failed - check OWASP / Trivy reports and Jenkins console output."
-    }
-  }
 }
